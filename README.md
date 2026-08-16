@@ -651,9 +651,25 @@ What's actually in place for this:
   exercising the flows in a real browser (see below).
 - Rate limiting is in-memory/per-process — see "Path to real production
   deploy" above for the multi-instance caveat.
-- CAPTCHA support is implemented but untested against real hCaptcha/
-  reCAPTCHA keys (none were available in this environment) — only the
-  "unconfigured, skipped" path was verified live.
+- CAPTCHA support (`src/lib/captcha.ts`) has been verified against both
+  providers' real verification APIs using their officially-published
+  public test credentials (designed by each provider specifically so
+  integration code can be tested without a real site registration):
+  - reCAPTCHA: Google's documented test secret
+    (https://developers.google.com/recaptcha/docs/faq) returned
+    `success:true` for any response token, and a garbage secret correctly
+    returned `success:false` — confirming the request isn't just trivially
+    always-true.
+  - hCaptcha: hCaptcha's documented test secret + test response token
+    (https://docs.hcaptcha.com/#integration-testing-test-keys) returned
+    `success:true` (`hostname:"dummy-key-pass"`); an arbitrary (non-test)
+    response token was correctly rejected.
+  Both confirm this app's exact request shape (`secret` + `response`, no
+  `sitekey` needed) is correct against the real APIs. What's still
+  unverified is the full end-to-end UI flow — the actual widget rendering
+  and a human solving it — which needs your own site registration with
+  either provider; the "unconfigured, skipped" no-widget path has already
+  been verified live in the app.
 - No "archive/deactivate a project" flow — a project's public pages stay
   live as long as its row exists.
 - `ADMIN` team-member listings on `/dashboard/agents` can reveal that a
