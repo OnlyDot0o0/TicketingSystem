@@ -1,0 +1,328 @@
+// RAQABA+ Helpdesk — Prisma schema
+// Ships with SQLite for zero-dependency local dev.
+// To move to production Postgres: change `provider` below to "postgresql",
+// point DATABASE_URL at a hosted Postgres instance (e.g. Neon/Supabase), and
+// optionally convert the String enum-like fields below (role, category,
+// priority, status, authorType) into real Prisma `enum` types — SQLite has
+// no native enum support so they are modeled as validated strings here; the
+// allowed values are enforced in application code (see src/lib/config.ts
+// and the zod-free manual checks in the server actions).
+//
+// Allowed values:
+//   User.role         : "ADMIN" | "AGENT" | "SUPER_ADMIN" | "CUSTOM"
+//   Ticket.category    : "LOGIN_CONNECTIVITY" | "ROUTES_PATROLS" | "RECORDS_DATES" | "PHOTOS_ATTACHMENTS" | "PERFORMANCE" | "OTHER"
+//   Ticket.priority     : "LOW" | "MEDIUM" | "HIGH" | "URGENT"
+//   Ticket.status       : "NEW" | "OPEN" | "PENDING" | "RESOLVED" | "CLOSED"
+//   TicketMessage.authorType : "SUBMITTER" | "AGENT"
+//   Project.emailMode / contractNumberMode / attachmentsMode : "REQUIRED" | "OPTIONAL" | "HIDDEN"
+//   Project.categoryMode / priorityMode : "REQUIRED" | "OPTIONAL" (no HIDDEN — they drive routing/SLA)
+//   CustomRole.baseRole : "ADMIN" | "AGENT"
+//   CustomField.fieldType : "TEXT" | "TEXTAREA" | "NUMBER" | "DATE" | "SELECT" | "CHECKBOX"
+//
+// Categories and SLA-by-priority timings are GLOBAL/shared across all
+// projects. Support-team users are now project-scoped (v2): SUPER_ADMIN
+// stays global/unscoped; ADMIN and AGENT require a ProjectMembership row to
+// see/work anything, see the Project/ProjectMembership models below.
+//
+// v3: SUPER_ADMIN-only CustomRole rows let a project-scoped account be a
+// named variant of ADMIN or AGENT ("baseRole") with 4 independently
+// toggleable extra permissions layered on top (see src/lib/access.ts for
+// how these resolve into an "effective permissions" object). A User whose
+// `role` is the literal string "CUSTOM" is linked to exactly one CustomRole
+// via `customRoleId`. Custom roles are always project-scoped exactly like
+// ADMIN/AGENT — only SUPER_ADMIN itself is ever global.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id           String      @id @default(cuid())
+  name         String
+  email        String      @unique
+  passwordHash String
+  role         String      @default("AGENT")
+  // Only meaningful when role === "CUSTOM" — resolves the user's actual
+  // (baseRole + toggles) permissions through the linked CustomRole row.
+  customRoleId String?
+  customRole   CustomRole? @relation(fields: [customRoleId], references: [id])
+  active       Boolean     @default(true)
+  createdAt    DateTime    @default(now())
+
+  assignedTickets Ticket[]             @relation("AssignedAgent")
+  memberships     ProjectMembership[]
+  resetTokens     PasswordResetToken[]
+
+  @@index([customRoleId])
+}
+
+// SUPER_ADMIN-only: a named variant of ADMIN or AGENT with a small,
+// independently-toggleable set of extra permissions layered on top — NOT a
+// full ground-up permissions matrix. Baseline ticket-working behavior
+// (queue/detail access, reply, status/priority/category/assignment, tags)
+// is unaffected by any of these toggles and is identical for every project
+// member regardless of role. See src/lib/access.ts for how a viewer's
+// effective permissions are resolved (built-in ADMIN = all 4 true,
+// built-in AGENT = all 4 false, CUSTOM = resolved through this row).
+model CustomRole {
+  id                       String   @id @default(cuid())
+  name                     String   @unique
+  baseRole                 String // "ADMIN" | "AGENT"
+  canManageTeam            Boolean  @default(false)
+  canManageTicketForm      Boolean  @default(false)
+  canViewReports           Boolean  @default(false)
+  canManageCannedResponses Boolean  @default(false)
+  createdAt                DateTime @default(now())
+
+  users User[]
+}
+
+// A client/project the support team provides helpdesk service for (e.g.
+// "رقابة+"). Public ticket pages and ticket numbering are scoped per
+// project; ADMIN/AGENT access to the support dashboard is scoped per
+// project via ProjectMembership (SUPER_ADMIN stays global).
+model Project {
+  id             String   @id @default(cuid())
+  slug           String   @unique
+  name           String
+  accentColorHex String
+  faqUrl         String?
+  ticketPrefix   String
+  ticketSeq      Int      @default(0)
+  createdAt      DateTime @default(now())
+
+  // Per-project ticket-form field configuration. "REQUIRED" | "OPTIONAL" for
+  // category/priority (they drive routing/SLA so always fall back to a
+  // default server-side — never left truly optional-without-a-default).
+  // "REQUIRED" | "OPTIONAL" | "HIDDEN" for the rest.
+  emailMode          String @default("OPTIONAL")
+  contractNumberMode String @default("OPTIONAL")
+  categoryMode       String @default("REQUIRED")
+  priorityMode       String @default("REQUIRED")
+  attachmentsMode    String @default("OPTIONAL")
+
+  tickets         Ticket[]
+  memberships     ProjectMembership[]
+  cannedResponses CannedResponse[]
+  tags            Tag[]
+  customFields    CustomField[]
+}
+
+// A project-defined custom ticket-form field (v3). Rendered on the public
+// /{slug}/tickets/new form after the built-in fields, in `order`. `key` is
+// a url/db-safe slug derived from `label`, unique per project. `options` is
+// only meaningful for fieldType "SELECT" — stored as a JSON string array
+// (SQLite has no native array/JSON column type). Values are always stored
+// as strings on TicketFieldValue and cast/formatted per fieldType at the UI
+// layer. Managed from /dashboard/projects/[id], gated by the
+// `canManageTicketForm` permission — same gate as the built-in
+// REQUIRED/OPTIONAL/HIDDEN field-mode controls already there.
+model CustomField {
+  id        String   @id @default(cuid())
+  projectId String
+  project   Project  @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  key       String
+  label     String
+  fieldType String // "TEXT" | "TEXTAREA" | "NUMBER" | "DATE" | "SELECT" | "CHECKBOX"
+  required  Boolean  @default(false)
+  options   String? // JSON string array, only meaningful for fieldType "SELECT"
+  order     Int      @default(0)
+  createdAt DateTime @default(now())
+
+  values TicketFieldValue[]
+
+  @@unique([projectId, key])
+  @@index([projectId])
+}
+
+// One ticket's value for one CustomField. Editable afterward by anyone who
+// can already edit other ticket properties (baseline ticket-editing action,
+// not gated by canManageTicketForm — that instead gates the field
+// DEFINITIONS, not per-ticket values).
+model TicketFieldValue {
+  id            String      @id @default(cuid())
+  ticketId      String
+  ticket        Ticket      @relation(fields: [ticketId], references: [id], onDelete: Cascade)
+  customFieldId String
+  customField   CustomField @relation(fields: [customFieldId], references: [id], onDelete: Cascade)
+  value         String
+
+  @@unique([ticketId, customFieldId])
+  @@index([ticketId])
+  @@index([customFieldId])
+}
+
+// Grants an ADMIN/AGENT account visibility into a project. SUPER_ADMIN
+// bypasses this entirely (see src/lib/access.ts). Unique on (userId,
+// projectId) — a user can't be a member of the same project twice.
+model ProjectMembership {
+  id        String   @id @default(cuid())
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  projectId String
+  project   Project  @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  createdAt DateTime @default(now())
+
+  @@unique([userId, projectId])
+  @@index([userId])
+  @@index([projectId])
+}
+
+// A reusable reply template scoped to one project.
+model CannedResponse {
+  id        String   @id @default(cuid())
+  projectId String
+  project   Project  @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  title     String
+  body      String
+  createdBy String
+  createdAt DateTime @default(now())
+
+  @@index([projectId])
+}
+
+// A project-scoped label, many-to-many with Ticket via TicketTag.
+model Tag {
+  id        String      @id @default(cuid())
+  projectId String
+  project   Project     @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  name      String
+  colorHex  String?
+  createdAt DateTime    @default(now())
+  tickets   TicketTag[]
+
+  @@unique([projectId, name])
+  @@index([projectId])
+}
+
+model TicketTag {
+  ticketId  String
+  ticket    Ticket   @relation(fields: [ticketId], references: [id], onDelete: Cascade)
+  tagId     String
+  tag       Tag      @relation(fields: [tagId], references: [id], onDelete: Cascade)
+  createdAt DateTime @default(now())
+
+  @@id([ticketId, tagId])
+  @@index([tagId])
+}
+
+// Auto-logged audit trail: status/priority/category/assignment changes and
+// tag add/remove. Shown as a separate timeline section on the ticket detail
+// page (not interleaved with the message thread — see README).
+model TicketActivity {
+  id        String   @id @default(cuid())
+  ticketId  String
+  ticket    Ticket   @relation(fields: [ticketId], references: [id], onDelete: Cascade)
+  actorName String
+  action    String
+  fromValue String?
+  toValue   String?
+  createdAt DateTime @default(now())
+
+  @@index([ticketId])
+}
+
+// Hashed, single-use, time-limited (1h) tokens for the agent self-service
+// "forgot password" flow. Only the SHA-256 hash is stored — never the raw
+// token (the raw token only ever exists in the emailed link).
+model PasswordResetToken {
+  id        String    @id @default(cuid())
+  userId    String
+  user      User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  tokenHash String    @unique
+  expiresAt DateTime
+  usedAt    DateTime?
+  createdAt DateTime  @default(now())
+
+  @@index([userId])
+}
+
+model Ticket {
+  id           String @id @default(cuid())
+  ticketNumber String @unique
+  subject      String
+  description  String
+  category     String
+  priority     String @default("MEDIUM")
+  status       String @default("NEW")
+
+  projectId String
+  project   Project @relation(fields: [projectId], references: [id])
+
+  submitterName  String
+  submitterPhone String
+  submitterEmail String?
+  contractNumber String?
+
+  assignedToId String?
+  assignedTo   User?   @relation("AssignedAgent", fields: [assignedToId], references: [id])
+
+  slaDueAt   DateTime
+  createdAt  DateTime  @default(now())
+  updatedAt  DateTime  @updatedAt
+  resolvedAt DateTime?
+
+  // CSAT (customer satisfaction) rating, 1-5. Collected via a one-click
+  // link in the "resolved" notification email (/csat/[ticketId]?rating=N).
+  // Modeled directly on Ticket, same as resolvedAt, since it's a single
+  // value per ticket — no separate table needed.
+  satisfactionRating      Int?
+  satisfactionSubmittedAt DateTime?
+
+  messages    TicketMessage[]
+  attachments Attachment[]
+  tags        TicketTag[]
+  activities  TicketActivity[]
+  fieldValues TicketFieldValue[]
+
+  @@index([status])
+  @@index([category])
+  @@index([priority])
+  @@index([assignedToId])
+  @@index([submitterPhone])
+  @@index([projectId])
+  // Composite indexes matching the actual dashboard query shapes: every
+  // queue/report query scopes by project first, then filters/sorts by one
+  // of these. A single-column index on projectId alone doesn't help the
+  // sort or the status/date range once a project has a large volume of
+  // tickets — these do.
+  @@index([projectId, createdAt])
+  @@index([projectId, status])
+  @@index([projectId, slaDueAt])
+}
+
+model TicketMessage {
+  id             String   @id @default(cuid())
+  ticketId       String
+  ticket         Ticket   @relation(fields: [ticketId], references: [id], onDelete: Cascade)
+  authorType     String
+  authorName     String
+  isInternalNote Boolean  @default(false)
+  body           String
+  createdAt      DateTime @default(now())
+
+  attachments Attachment[]
+
+  @@index([ticketId])
+}
+
+model Attachment {
+  id        String         @id @default(cuid())
+  ticketId  String
+  ticket    Ticket         @relation(fields: [ticketId], references: [id], onDelete: Cascade)
+  messageId String?
+  message   TicketMessage? @relation(fields: [messageId], references: [id], onDelete: Cascade)
+  filename  String
+  path      String
+  mimeType  String
+  size      Int
+  createdAt DateTime       @default(now())
+
+  @@index([ticketId])
+  @@index([messageId])
+}

@@ -1,0 +1,116 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  --bg: #f2f4f1;
+  --surface: #ffffff;
+  --ink: #16221f;
+  --ink-soft: #4b5c57;
+  --border: #d3dbd4;
+  --accent: #b5691a;
+  --teal: #276661;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #121815;
+    --surface: #1b2420;
+    --ink: #eef2ef;
+    --ink-soft: #a9b7b1;
+    --border: #33413c;
+    --accent: #d98a3d;
+    --teal: #5aada5;
+  }
+}
+
+* {
+  border-color: var(--border);
+}
+
+html,
+body {
+  background: var(--bg);
+  color: var(--ink);
+}
+
+body {
+  font-family: -apple-system, "Segoe UI", Roboto, "Noto Kufi Arabic", Tahoma, Arial, sans-serif;
+}
+
+.badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.25rem;
+  border-radius: 999px;
+  padding: 0.15rem 0.65rem;
+  font-size: 0.75rem;
+  font-weight: 600;
+  border: 1px solid var(--border);
+  white-space: nowrap;
+}
+
+.card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 0.9rem;
+}
+
+.btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.4rem;
+  border-radius: 0.6rem;
+  padding: 0.6rem 1.1rem;
+  font-weight: 600;
+  transition: opacity 0.15s ease, transform 0.05s ease;
+  border: 1px solid transparent;
+}
+.btn:active {
+  transform: scale(0.98);
+}
+.btn-primary {
+  background: var(--teal);
+  color: #ffffff;
+}
+.btn-primary:hover {
+  opacity: 0.92;
+}
+.btn-accent {
+  background: var(--accent);
+  color: #ffffff;
+}
+.btn-accent:hover {
+  opacity: 0.92;
+}
+.btn-outline {
+  background: transparent;
+  border-color: var(--border);
+  color: var(--ink);
+}
+.btn-outline:hover {
+  background: color-mix(in srgb, var(--ink) 5%, transparent);
+}
+
+.field {
+  width: 100%;
+  border: 1px solid var(--border);
+  background: var(--surface);
+  color: var(--ink);
+  border-radius: 0.55rem;
+  padding: 0.6rem 0.8rem;
+  font-size: 0.95rem;
+}
+.field:focus {
+  outline: 2px solid var(--teal);
+  outline-offset: 1px;
+}
+
+.label {
+  font-size: 0.85rem;
+  font-weight: 600;
+  color: var(--ink-soft);
+  margin-bottom: 0.3rem;
+  display: block;
+}
