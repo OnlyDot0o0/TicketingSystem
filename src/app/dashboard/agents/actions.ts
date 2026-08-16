@@ -2,6 +2,7 @@
 
 import { prisma } from "@/lib/prisma";
 import { getViewerScope, canAccessProject } from "@/lib/access";
+import { ROLE_LABELS } from "@/lib/config";
 import bcrypt from "bcryptjs";
 import { revalidatePath } from "next/cache";
 
@@ -24,6 +25,16 @@ function decodeRoleSelection(raw: string): { role: string; customRoleId: string 
     return { role: "CUSTOM", customRoleId: id };
   }
   return null;
+}
+
+// Human-readable label for the audit log — built-in roles use ROLE_LABELS,
+// a custom role looks up its own name.
+async function roleDisplayLabel(role: string, customRoleId: string | null): Promise<string> {
+  if (role === "CUSTOM" && customRoleId) {
+    const cr = await prisma.customRole.findUnique({ where: { id: customRoleId } });
+    return cr?.name || "دور مخصص";
+  }
+  return ROLE_LABELS[role] || role;
 }
 
 // SUPER_ADMIN can assign any built-in role or any custom role. Anyone with
@@ -80,7 +91,17 @@ export async function createAgentAction(
   const passwordHash = await bcrypt.hash(tempPassword, 10);
 
   const user = await prisma.user.create({
-    data: { name, email, passwordHash, role: decoded.role as never, customRoleId: decoded.customRoleId },
+    data: {
+      name,
+      email,
+      passwordHash,
+      role: decoded.role as never,
+      customRoleId: decoded.customRoleId,
+      // The temp password below is shown once, out-of-band, to the
+      // inviting admin — force the new hire to set their own before they
+      // can reach anything else in the dashboard (see src/middleware.ts).
+      mustChangePassword: true,
+    },
   });
 
   if (projectIds.length > 0 && decoded.role !== "SUPER_ADMIN") {
@@ -94,6 +115,16 @@ export async function createAgentAction(
       });
     }
   }
+
+  await prisma.adminActivity.create({
+    data: {
+      actorName: scope.name || "مدير",
+      action: "AGENT_CREATED",
+      targetType: "AGENT",
+      targetLabel: `${name} (${email})`,
+      toValue: await roleDisplayLabel(decoded.role, decoded.customRoleId),
+    },
+  });
 
   revalidatePath("/dashboard/agents");
   return { success: `تم إنشاء الحساب. كلمة المرور المؤقتة: ${tempPassword} (يرجى إبلاغها للموظف وتغييرها فور الدخول)` };
@@ -126,7 +157,21 @@ export async function toggleAgentActiveAction(userId: string, active: boolean) {
   if (allowed.length === 0) return;
   if (scope.userId === userId && !active) return; // don't let someone deactivate themselves
   if (!(await canManageUser(scope, userId))) return;
+
+  const target = await prisma.user.findUnique({ where: { id: userId } });
+  if (!target) return;
+
   await prisma.user.update({ where: { id: userId }, data: { active } });
+
+  await prisma.adminActivity.create({
+    data: {
+      actorName: scope.name || "مدير",
+      action: active ? "AGENT_ACTIVATED" : "AGENT_DEACTIVATED",
+      targetType: "AGENT",
+      targetLabel: `${target.name} (${target.email})`,
+    },
+  });
+
   revalidatePath("/dashboard/agents");
 }
 
@@ -140,6 +185,26 @@ export async function updateAgentRoleAction(userId: string, roleSelection: strin
   if (!decoded) return;
   if (scope.userId === userId) return; // don't let someone change their own role
   if (!(await canManageUser(scope, userId))) return;
+
+  const target = await prisma.user.findUnique({ where: { id: userId } });
+  if (!target) return;
+
   await prisma.user.update({ where: { id: userId }, data: { role: decoded.role, customRoleId: decoded.customRoleId } });
+
+  const [fromLabel, toLabel] = await Promise.all([
+    roleDisplayLabel(target.role, target.customRoleId),
+    roleDisplayLabel(decoded.role, decoded.customRoleId),
+  ]);
+  await prisma.adminActivity.create({
+    data: {
+      actorName: scope.name || "مدير",
+      action: "AGENT_ROLE_CHANGED",
+      targetType: "AGENT",
+      targetLabel: `${target.name} (${target.email})`,
+      fromValue: fromLabel,
+      toValue: toLabel,
+    },
+  });
+
   revalidatePath("/dashboard/agents");
 }

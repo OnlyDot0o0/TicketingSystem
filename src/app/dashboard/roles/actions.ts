@@ -2,6 +2,7 @@
 
 import { prisma } from "@/lib/prisma";
 import { auth } from "@/lib/auth";
+import { ROLE_LABELS } from "@/lib/config";
 import { revalidatePath } from "next/cache";
 
 export type RoleFormState = { error?: string; success?: string };
@@ -39,6 +40,16 @@ export async function createCustomRoleAction(
     data: { name, baseRole, canManageTeam, canManageTicketForm, canViewReports, canManageCannedResponses },
   });
 
+  await prisma.adminActivity.create({
+    data: {
+      actorName: session.user.name || "مدير عام",
+      action: "ROLE_CREATED",
+      targetType: "ROLE",
+      targetLabel: name,
+      toValue: ROLE_LABELS[baseRole] || baseRole,
+    },
+  });
+
   revalidatePath("/dashboard/roles");
   return { success: `تم إنشاء الدور "${name}".` };
 }
@@ -65,9 +76,22 @@ export async function updateCustomRoleAction(
   const nameClash = await prisma.customRole.findFirst({ where: { name, id: { not: id } } });
   if (nameClash) return { error: "يوجد دور مخصص آخر بنفس الاسم." };
 
+  const before = await prisma.customRole.findUnique({ where: { id } });
+
   await prisma.customRole.update({
     where: { id },
     data: { name, baseRole, canManageTeam, canManageTicketForm, canViewReports, canManageCannedResponses },
+  });
+
+  await prisma.adminActivity.create({
+    data: {
+      actorName: session.user.name || "مدير عام",
+      action: "ROLE_UPDATED",
+      targetType: "ROLE",
+      targetLabel: name,
+      fromValue: before && before.name !== name ? before.name : null,
+      toValue: before && before.name !== name ? name : null,
+    },
   });
 
   revalidatePath("/dashboard/roles");
@@ -86,12 +110,23 @@ export async function deleteCustomRoleAction(id: string): Promise<DeleteRoleResu
   const session = await requireSuperAdmin();
   if (!session) return { error: "غير مصرح." };
 
+  const role = await prisma.customRole.findUnique({ where: { id } });
   const assignedCount = await prisma.user.count({ where: { customRoleId: id } });
   if (assignedCount > 0) {
     return { error: `لا يمكن حذف هذا الدور — هناك ${assignedCount} حساب(ات) لا تزال معيّنة إليه. غيّر دورهم أولًا من صفحة "فريق الدعم".` };
   }
 
   await prisma.customRole.delete({ where: { id } });
+
+  await prisma.adminActivity.create({
+    data: {
+      actorName: session.user.name || "مدير عام",
+      action: "ROLE_DELETED",
+      targetType: "ROLE",
+      targetLabel: role?.name || "دور محذوف",
+    },
+  });
+
   revalidatePath("/dashboard/roles");
   return { success: true };
 }

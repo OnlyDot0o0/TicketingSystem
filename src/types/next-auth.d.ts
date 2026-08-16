@@ -6,12 +6,14 @@ declare module "next-auth" {
       id: string;
       role: "SUPER_ADMIN" | "ADMIN" | "AGENT" | "CUSTOM";
       customRoleId?: string | null;
+      mustChangePassword: boolean;
     } & DefaultSession["user"];
   }
 
   interface User {
     role: "SUPER_ADMIN" | "ADMIN" | "AGENT" | "CUSTOM";
     customRoleId?: string | null;
+    mustChangePassword?: boolean;
   }
 }
 
@@ -20,5 +22,6 @@ declare module "next-auth/jwt" {
     role?: "SUPER_ADMIN" | "ADMIN" | "AGENT" | "CUSTOM";
     id?: string;
     customRoleId?: string | null;
+    mustChangePassword?: boolean;
   }
 }

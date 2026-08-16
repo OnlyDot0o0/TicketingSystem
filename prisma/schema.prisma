@@ -18,6 +18,7 @@
 //   Project.categoryMode / priorityMode : "REQUIRED" | "OPTIONAL" (no HIDDEN — they drive routing/SLA)
 //   CustomRole.baseRole : "ADMIN" | "AGENT"
 //   CustomField.fieldType : "TEXT" | "TEXTAREA" | "NUMBER" | "DATE" | "SELECT" | "CHECKBOX"
+//   AdminActivity.targetType : "PROJECT" | "ROLE" | "AGENT"
 //
 // Categories and SLA-by-priority timings are GLOBAL/shared across all
 // projects. Support-team users are now project-scoped (v2): SUPER_ADMIN
@@ -31,6 +32,12 @@
 // `role` is the literal string "CUSTOM" is linked to exactly one CustomRole
 // via `customRoleId`. Custom roles are always project-scoped exactly like
 // ADMIN/AGENT — only SUPER_ADMIN itself is ever global.
+//
+// v5 (hardening pass): User gained mustChangePassword (forced first-login
+// password change for admin-created accounts) and totpSecret/totpEnabled
+// (self-service TOTP 2FA). A new AdminActivity model mirrors TicketActivity
+// but for administrative actions (project/role/team changes) that
+// previously left no audit trail — see /dashboard/audit (SUPER_ADMIN-only).
 
 generator client {
   provider = "prisma-client-js"
@@ -53,6 +60,25 @@ model User {
   customRole   CustomRole? @relation(fields: [customRoleId], references: [id])
   active       Boolean     @default(true)
   createdAt    DateTime    @default(now())
+
+  // Set true when an admin creates the account (see createAgentAction) —
+  // the temp password shown to the inviting admin is a one-time secret the
+  // new hire only knows out-of-band, so they're forced to /dashboard/change-password
+  // (gated server-side in src/middleware.ts) before anything else in the
+  // dashboard is reachable. Cleared by changePasswordAction once they set
+  // their own password.
+  mustChangePassword Boolean @default(false)
+
+  // TOTP 2FA (self-service, staff only — see /dashboard/settings).
+  // totpSecret is the raw base32 secret, intentionally NOT hashed: unlike a
+  // password, the server must be able to recompute/verify a 6-digit code
+  // against it on every login, which a one-way hash would make impossible.
+  // This is standard practice for TOTP (the same tradeoff every
+  // authenticator-app integration makes). Null until the user enrolls;
+  // totpEnabled only flips true after they prove they scanned the QR code
+  // by submitting one valid code back (see enrollTotpAction).
+  totpSecret  String?
+  totpEnabled Boolean @default(false)
 
   assignedTickets Ticket[]             @relation("AssignedAgent")
   memberships     ProjectMembership[]
@@ -225,6 +251,30 @@ model TicketActivity {
   createdAt DateTime @default(now())
 
   @@index([ticketId])
+}
+
+// Admin-level audit trail (v5) — a parallel log to TicketActivity, but for
+// administrative actions that don't belong to a single ticket (project
+// create/edit, custom-role create/edit/delete, project-membership add/
+// remove, agent-account create/role-change/activate/deactivate) and
+// previously left no trail at all. No FK to the target row (it may since
+// have been deleted, e.g. a removed member or a deleted role) — targetType
+// + targetLabel are a plain, human-readable snapshot instead, same spirit
+// as TicketActivity's actorName/fromValue/toValue being plain strings
+// rather than relations. SUPER_ADMIN-only listing at /dashboard/audit,
+// newest first, with a simple action-type filter.
+model AdminActivity {
+  id          String   @id @default(cuid())
+  actorName   String
+  action      String
+  targetType  String // "PROJECT" | "ROLE" | "AGENT"
+  targetLabel String
+  fromValue   String?
+  toValue     String?
+  createdAt   DateTime @default(now())
+
+  @@index([createdAt])
+  @@index([action])
 }
 
 // Hashed, single-use, time-limited (1h) tokens for the agent self-service

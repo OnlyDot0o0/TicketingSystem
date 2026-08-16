@@ -53,6 +53,16 @@ export async function createProjectAction(
     data: { name, slug, ticketPrefix, accentColorHex, faqUrl },
   });
 
+  await prisma.adminActivity.create({
+    data: {
+      actorName: session.user.name || "مدير عام",
+      action: "PROJECT_CREATED",
+      targetType: "PROJECT",
+      targetLabel: name,
+      toValue: slug,
+    },
+  });
+
   revalidatePath("/dashboard/projects");
   revalidatePath("/");
   return { success: `تم إنشاء المشروع "${name}" بنجاح. الصفحة متاحة الآن على /${slug}` };
@@ -82,9 +92,26 @@ export async function updateProjectAction(
     return { error: "لون غير صالح — استخدم صيغة hex مثل #276661." };
   }
 
+  const before = await prisma.project.findUnique({ where: { id } });
+
   await prisma.project.update({
     where: { id },
     data: { name, ticketPrefix, accentColorHex, faqUrl },
+  });
+
+  // Branding touches several fields at once (name/prefix/color/FAQ url) —
+  // there's no single clean "the value" to diff the way a ticket's single-
+  // field changes do, so only the name (the one field worth surfacing as a
+  // before/after) is logged, and only when it actually changed.
+  await prisma.adminActivity.create({
+    data: {
+      actorName: session.user.name || "مدير عام",
+      action: "PROJECT_BRANDING_UPDATED",
+      targetType: "PROJECT",
+      targetLabel: name,
+      fromValue: before && before.name !== name ? before.name : null,
+      toValue: before && before.name !== name ? name : null,
+    },
   });
 
   revalidatePath("/dashboard/projects");
@@ -132,9 +159,21 @@ export async function updateTicketFormConfigAction(
     return { error: "التصنيف والأولوية يجب أن يكونا إلزامي أو اختياري فقط (لا يمكن إخفاؤهما)." };
   }
 
-  await prisma.project.update({
+  const updated = await prisma.project.update({
     where: { id: projectId },
     data: { emailMode, contractNumberMode, categoryMode, priorityMode, attachmentsMode },
+  });
+
+  // Five fields change together here — no single meaningful before/after
+  // pair, so just the fact that it happened (and to which project) is
+  // logged, same reasoning as the branding update above.
+  await prisma.adminActivity.create({
+    data: {
+      actorName: scope.name || "مدير",
+      action: "PROJECT_TICKET_FORM_UPDATED",
+      targetType: "PROJECT",
+      targetLabel: updated.name,
+    },
   });
 
   revalidatePath(`/dashboard/projects/${projectId}`);
@@ -168,6 +207,16 @@ export async function addProjectMemberAction(
     create: { userId, projectId },
   });
 
+  await prisma.adminActivity.create({
+    data: {
+      actorName: session.user.name || "مدير عام",
+      action: "PROJECT_MEMBER_ADDED",
+      targetType: "PROJECT",
+      targetLabel: project.name,
+      toValue: user.name,
+    },
+  });
+
   revalidatePath(`/dashboard/projects/${projectId}`);
   return { success: `تمت إضافة ${user.name} إلى فريق المشروع.` };
 }
@@ -175,7 +224,26 @@ export async function addProjectMemberAction(
 export async function removeProjectMemberAction(projectId: string, userId: string) {
   const session = await requireSuperAdmin();
   if (!session) return;
+
+  const [project, user] = await Promise.all([
+    prisma.project.findUnique({ where: { id: projectId } }),
+    prisma.user.findUnique({ where: { id: userId } }),
+  ]);
+
   await prisma.projectMembership.deleteMany({ where: { projectId, userId } });
+
+  if (project && user) {
+    await prisma.adminActivity.create({
+      data: {
+        actorName: session.user.name || "مدير عام",
+        action: "PROJECT_MEMBER_REMOVED",
+        targetType: "PROJECT",
+        targetLabel: project.name,
+        fromValue: user.name,
+      },
+    });
+  }
+
   revalidatePath(`/dashboard/projects/${projectId}`);
 }
 
