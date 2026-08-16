@@ -23,6 +23,11 @@ export default async function DashboardLayout({ children }: { children: React.Re
                   الأدوار المخصصة
                 </Link>
               )}
+              {scope?.isSuperAdmin && (
+                <Link href="/dashboard/audit" className="text-ink-soft hover:text-teal">
+                  سجل التدقيق
+                </Link>
+              )}
               {scope && (scope.isSuperAdmin || scope.permissions.canViewReports) && (
                 <Link href="/dashboard/reports" className="text-ink-soft hover:text-teal">
                   التقارير
