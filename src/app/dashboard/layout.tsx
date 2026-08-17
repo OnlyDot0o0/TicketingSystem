@@ -51,6 +51,11 @@ export default async function DashboardLayout({ children }: { children: React.Re
             </nav>
           </div>
           <div className="flex items-center gap-3 text-sm">
+            {scope && (
+              <Link href="/dashboard/settings" className="text-ink-soft hover:text-teal">
+                الإعدادات
+              </Link>
+            )}
             <span className="text-ink-soft">
               {scope?.name}
               <span className="mr-1 text-xs">

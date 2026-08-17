@@ -1,7 +1,24 @@
 import NextAuth from "next-auth";
 import Credentials from "next-auth/providers/credentials";
+import { CredentialsSignin } from "next-auth";
 import bcrypt from "bcryptjs";
 import { prisma } from "./prisma";
+import { verifyTotpCode } from "./totp";
+
+// Thrown from authorize() below when a TOTP-enrolled account has the right
+// password but hasn't submitted a code yet. next-auth wraps any
+// CredentialsSignin subclass thrown from authorize() and rethrows the same
+// instance back through signIn() when called from a server action (see
+// loginAction in src/app/login/actions.ts) — `code` survives the round
+// trip, so the login form can tell "need a code" apart from "wrong
+// password" without leaking that distinction to a would-be attacker who
+// hasn't gotten the password right yet.
+export class TotpRequiredError extends CredentialsSignin {
+  code = "totp_required";
+}
+export class TotpInvalidError extends CredentialsSignin {
+  code = "totp_invalid";
+}
 
 export const { handlers, auth, signIn, signOut, unstable_update } = NextAuth({
   session: { strategy: "jwt" },
@@ -14,6 +31,7 @@ export const { handlers, auth, signIn, signOut, unstable_update } = NextAuth({
       credentials: {
         email: { label: "البريد الإلكتروني", type: "email" },
         password: { label: "كلمة المرور", type: "password" },
+        totpCode: { label: "رمز التحقق", type: "text" },
       },
       authorize: async (credentials) => {
         const email = credentials?.email as string | undefined;
@@ -25,6 +43,17 @@ export const { handlers, auth, signIn, signOut, unstable_update } = NextAuth({
 
         const valid = await bcrypt.compare(password, user.passwordHash);
         if (!valid) return null;
+
+        // Password is correct. Accounts that never enrolled in 2FA sign in
+        // exactly as before (single step). Enrolled accounts need a second,
+        // valid TOTP code before a session is issued — loginAction rate-
+        // limits code attempts before ever reaching this point.
+        if (user.totpEnabled && user.totpSecret) {
+          const totpCode = credentials?.totpCode as string | undefined;
+          if (!totpCode) throw new TotpRequiredError();
+          const codeValid = await verifyTotpCode(user.totpSecret, totpCode);
+          if (!codeValid) throw new TotpInvalidError();
+        }
 
         return {
           id: user.id,
