@@ -43,6 +43,9 @@ password reset).
 | `/dashboard/canned-responses` | `ADMIN`/`SUPER_ADMIN` — manage reusable reply templates |
 | `/dashboard/projects` | `SUPER_ADMIN`: create/edit any project. `ADMIN`: read-only list of their own project(s) |
 | `/dashboard/projects/[id]` | Project detail: ticket-form config (SUPER_ADMIN + project ADMIN) + team members (SUPER_ADMIN only) |
+| `/dashboard/change-password` | (v5) Forced first-login password change for admin-created accounts — see "Hardening pass" below |
+| `/dashboard/settings` | (v5) Any logged-in staff account — self-service TOTP 2FA enrollment/disable |
+| `/dashboard/audit` | (v5) `SUPER_ADMIN`-only — the admin activity log |
 | `/csat/[ticketId]` | Public, unauthenticated one-click CSAT rating landing page (v4) — linked from the "resolved" notification email |
 
 A slug that doesn't match any `Project` row 404s (via `getProjectBySlugOr404`
@@ -451,6 +454,101 @@ Four independent additions to the ticket queue and ticket lifecycle:
   generic "if an account exists..." message regardless of whether the
   email is registered, to avoid user enumeration.
 
+## Hardening pass (v5): forced password change, admin audit trail, TOTP 2FA
+
+Three related additions, done together in one round because all three
+touch the `User` model (`mustChangePassword`, `totpSecret`, `totpEnabled`)
+and would conflict on `prisma/schema.prisma` if split into parallel work.
+
+### Forced password change on first login
+
+`createAgentAction` (`src/app/dashboard/agents/actions.ts`) already
+generates a random temp password shown once to the inviting admin — the
+new hire only ever learns it out-of-band. That account now also gets
+`User.mustChangePassword: true`, and `src/middleware.ts` redirects **every**
+`/dashboard/*` request except `/dashboard/change-password` itself back to
+that page while the flag is set — server-side, the same enforcement point
+already used for the login gate, not a client-side redirect. The flag
+travels on the session JWT (see `src/lib/auth.ts`'s `jwt`/`session`
+callbacks) so middleware doesn't need a DB round-trip per request; once
+`/dashboard/change-password`'s `changePasswordAction` clears it in the DB,
+it calls NextAuth's `unstable_update()` to refresh the JWT claim in place
+so the user isn't bounced back after setting their password. The page asks
+only for a new password (min. 8 chars, same validation as
+`/reset-password`) — no "current password" field, since the only password
+the account holder actually knows is the one an admin told them.
+
+### Admin activity log
+
+A new `AdminActivity` model (`id`, `actorName`, `action`, `targetType`,
+`targetLabel`, `fromValue`/`toValue` — both nullable, `createdAt`) parallels
+`TicketActivity` but for administrative actions that previously left no
+trail: project create / branding update / ticket-form-config update,
+project-membership add/remove, custom-role create/update/delete, and agent
+account create/role-change/activate/deactivate. Logging calls were added
+directly into the existing server actions in
+`src/app/dashboard/projects/actions.ts`, `.../roles/actions.ts`, and
+`.../agents/actions.ts` — inline `prisma.adminActivity.create()` calls,
+same as `TicketActivity` rows are created inline throughout this codebase
+rather than through a shared helper. `fromValue`/`toValue` are only
+populated when there's one clean single value worth diffing (e.g. a role
+rename, an agent's old→new role) — multi-field updates like project
+branding or ticket-form config just log that the action happened, since
+there's no single "the value" to show without over-building this into a
+full field-level diff.
+
+`/dashboard/audit` (`SUPER_ADMIN`-only, linked from the nav as "سجل
+التدقيق") lists this log newest-first with a simple action-type filter
+dropdown, capped at the 200 most recent rows — deliberately as plain as
+`/dashboard/roles`, no pagination or per-column sorting.
+
+### TOTP 2FA for staff accounts
+
+Fully self-contained, no external service — works with any standard
+authenticator app (Google Authenticator, Authy, etc.) via `otplib`
+(TOTP generation/verification) and `qrcode` (server-rendered enrollment QR
+as a data URI). `User.totpSecret` (raw base32, intentionally **not**
+hashed — the server has to recompute/verify a code against it on every
+login, which a one-way hash would make impossible; this is standard
+practice for TOTP, documented in a schema comment) and `User.totpEnabled`
+back it.
+
+- **Enrollment** (`/dashboard/settings`, reachable by any logged-in staff
+  account — no such page existed before this round): generate a secret,
+  see the QR code plus a manual-entry fallback code, confirm by entering
+  one valid 6-digit code. `totpEnabled` only flips true once that code
+  checks out — proving the account holder actually scanned it, not just
+  that a secret exists. **Disabling requires the current password**
+  (bcrypt-checked server-side), not just a click, since turning 2FA off
+  weakens the account.
+- **Login** (`src/lib/auth.ts`'s `authorize()`): for a `totpEnabled`
+  account, a correct password with no (or an invalid) code throws a custom
+  `CredentialsSignin` subclass (`TotpRequiredError` / `TotpInvalidError`,
+  distinguished by a `code` property) instead of returning `null`. Because
+  `loginAction` (`src/app/login/actions.ts`) calls `signIn()` from a
+  server action, next-auth rethrows that exact error instance back to the
+  caller (verified by reading `@auth/core`'s internals — this only holds
+  for the server-action/"raw" call path, not the default redirect-based
+  flow), so `loginAction` can tell "needs a code" apart from "wrong
+  password" via `err.code` and return a `needsTotp` state instead of an
+  error. `LoginForm.tsx` reveals a second field on that response and
+  resubmits with the same email/password plus the code. Accounts that
+  never enrolled take the exact same single-step path as always — nothing
+  about their `authorize()` branch changed.
+- **Rate limiting**: TOTP code attempts go through the same
+  `checkRateLimit()` used for login attempts, in the same place
+  (`loginAction`, before `signIn()` is even called), keyed separately from
+  the general login limiter. In practice the general login limiter (10
+  attempts/hour per email+IP, counting every submission including
+  password-only ones) usually catches a code-guessing burst first, since
+  both limiters share the same window size and starting point — the
+  dedicated TOTP bucket is still real defense-in-depth (a legitimate user
+  who's already used up several attempts on password typos gets a
+  slightly different budget for the code step), but its own cap rarely
+  fires independently. Confirmed live either way: repeated wrong-code
+  submissions do get blocked with the same "too many attempts" message the
+  login limiter already shows.
+
 ## Tech stack
 
 - **Next.js 14** (App Router) + **TypeScript**
@@ -458,8 +556,10 @@ Four independent additions to the ticket queue and ticket lifecycle:
 - **Prisma ORM** — ships with **SQLite** for zero-dependency local dev
   (`prisma/dev.db`); switching to Postgres in production is a one-line
   datasource change (see below)
-- **Auth.js (NextAuth v5)**, Credentials provider (email + bcrypt password),
-  for the support team only (`SUPER_ADMIN` / `ADMIN` / `AGENT` roles)
+- **Auth.js (NextAuth v5)**, Credentials provider (email + bcrypt password,
+  optionally a second TOTP step — see "Hardening pass" above), for the
+  support team only (`SUPER_ADMIN` / `ADMIN` / `AGENT` / `CUSTOM` roles)
+- **otplib** + **qrcode** (v5) — self-service TOTP 2FA, no external service
 - **recharts** for the reporting dashboard
 - **nodemailer** for email notifications (ticket lifecycle + password
   reset) — degrades gracefully (logs to console instead of crashing) when
@@ -580,9 +680,11 @@ src/lib/ticketQueue.ts          Shared ticket-queue where/orderBy builder (v4) �
 src/lib/rateLimit.ts            In-memory fixed-window rate limiter
 src/lib/captcha.ts              Optional hCaptcha/reCAPTCHA v2 support
 src/lib/passwordReset.ts        Hashed, single-use, time-limited reset tokens
+src/lib/totp.ts                 (v5) otplib/qrcode wrapper — secret gen, QR data URI, code verification
 src/lib/                        auth, prisma client, mail, notifications, SLA calc,
                                  upload, config, projects (slug resolution + field-mode types)
-src/middleware.ts                protects /dashboard/* behind NextAuth
+src/middleware.ts                protects /dashboard/* behind NextAuth; (v5) also forces
+                                 /dashboard/change-password while mustChangePassword is set
 src/app/page.tsx                project directory / picker (home page)
 src/app/[slug]/                 project-scoped public pages (landing, tickets/new, tickets/track)
 src/app/tickets/{new,track}     legacy redirects to /raqaba/tickets/...
@@ -593,6 +695,9 @@ src/app/dashboard/               support team (project-scoped)
 src/app/dashboard/TicketQueueTable.tsx  ticket queue table incl. checkboxes + bulk-action bar (v4, client component)
 src/app/dashboard/bulk-actions.ts       bulk status/assign/tag server actions, per-ticket access re-check (v4)
 src/app/dashboard/export.csv/   CSV export of the currently-filtered queue (v4)
+src/app/dashboard/change-password/  (v5) forced first-login password change
+src/app/dashboard/settings/     (v5) self-service TOTP 2FA enrollment/disable, any staff account
+src/app/dashboard/audit/        (v5) SUPER_ADMIN-only admin activity log
 src/app/dashboard/projects/     SUPER_ADMIN: create/edit any project; ADMIN: own project(s) only
 src/app/dashboard/projects/[id] ticket-form config + team membership
 src/app/dashboard/canned-responses/  manage reusable reply templates
@@ -699,6 +804,32 @@ What's actually in place for this:
   nothing re-checks it server-side). Not introduced by this round; flagged
   here since bulk operations make it easier to hit across many
   tickets/projects at once than a single assignment does.
+- (v5) The dedicated TOTP rate-limit bucket is real but largely shadowed by
+  the pre-existing general login limiter, which already caps every
+  submission (password-only or code) at 10/hour per email+IP — see
+  "Hardening pass" above. Not a security gap (codes ARE capped, confirmed
+  live), just worth knowing if you ever want the two limits to behave
+  independently (e.g. a generous password-retry budget but a tight
+  code-retry budget) — that would need the general limiter to stop
+  counting code-only resubmissions.
+- (v5) `/dashboard/audit` has no pagination past its 200-row cap, same
+  proportionate "keep it simple" choice as `/dashboard/roles` not having
+  any list controls beyond a single filter — a deployment with heavy admin
+  activity over a long period would eventually want real pagination or a
+  date-range filter here.
+- (v5) Disabling TOTP clears `totpSecret` entirely rather than keeping it
+  around — re-enabling always means a fresh QR scan. This was a deliberate
+  choice (a stale secret sitting in the DB unencrypted after being
+  "disabled" felt like the wrong default), but means there's no "pause and
+  resume with the same secret" option.
+- (v5) `AdminActivity` has no foreign key to the `User`/`Project`/
+  `CustomRole` rows it describes — `actorName`/`targetLabel` are plain
+  string snapshots, same reasoning as `TicketActivity`. This means a
+  renamed user or project shows its *old* name in historical log entries,
+  which is intentional (an audit log should read as "what happened at the
+  time", not silently rewrite itself when the underlying row changes
+  later) but worth knowing if you expected it to always reflect current
+  names.
 
 ## Verification performed
 
@@ -928,3 +1059,96 @@ What's actually in place for this:
   agent who has access to none of the selected tickets' project(s) simply
   isn't offered as an option, matching the single-ticket page's existing
   behavior.
+
+## Verification performed (v5 — forced password change, admin audit trail, TOTP 2FA)
+
+- One combined migration (`add_password_enforcement_audit_totp`, since all
+  three features' schema changes touch `User` and were done as one round),
+  `npx tsc --noEmit`, and `npm run build` (fresh `.next`) all run clean
+  after each of the three sub-features and again at the end.
+- Manually exercised end-to-end in a real browser against the dev server:
+  - **Forced password change**: as `admin@raqaba.local`, created a new
+    `AGENT` account (`newhire@raqaba.local`) from `/dashboard/agents`,
+    noted the generated temp password. Logged in as that account — landed
+    on `/dashboard/change-password` instead of the ticket queue. Tried
+    navigating directly to `/dashboard` — bounced straight back to the
+    change-password page (server-side, confirmed by the URL never
+    resolving to the ticket queue). Set a new password (min. 8 chars) —
+    succeeded, and clicking "المتابعة إلى لوحة التحكم" landed on the
+    ticket queue with no redirect loop (confirming the `unstable_update()`
+    JWT refresh worked, not just the DB flag). Logged in again as
+    `agent@raqaba.local` (a pre-existing account, never admin-created,
+    `mustChangePassword: false`) — went straight to the dashboard as
+    before, confirming existing accounts are unaffected.
+  - **Admin audit trail**: as `admin@raqaba.local`, created a project,
+    renamed it (branding update), changed its ticket-form config, added
+    and removed a project member, created a custom role, renamed it,
+    deleted it, and created/activated/deactivated/role-changed the new
+    agent account — 12 actions total. `/dashboard/audit` showed all 12,
+    newest first, with correct actor names, target labels, and from→to
+    values where applicable (e.g. "دور اختبار السجل ← دور اختبار السجل
+    المعدّل" for the role rename, "موظف دعم ← مدير" for the role change).
+    The action-type filter dropdown correctly narrowed the list to just
+    `PROJECT_CREATED` when selected. Logged in as plain `agent@raqaba.local`
+    (no `SUPER_ADMIN`) and confirmed direct navigation to `/dashboard/audit`
+    redirects to the ticket queue instead of rendering.
+  - **TOTP 2FA**: as `newhire@raqaba.local`, opened `/dashboard/settings`,
+    clicked "تفعيل المصادقة الثنائية" — got a QR code and a manual-entry
+    secret (`H7LMHPMNV3BOESQPD2ZRPKSRYNIMT5FP` on the first run). Rather
+    than reading the QR visually, computed a real TOTP code for that exact
+    secret with a small one-off script calling otplib's own `generate()`
+    function directly (the same math an authenticator app runs), and
+    submitted that computed code to confirm enrollment — succeeded,
+    status flipped to "مفعّلة ✓". Logged out and back in: the password-only
+    submission correctly revealed the code field instead of erroring;
+    submitting a wrong code (`000000`) was rejected with "رمز التحقق غير
+    صحيح أو منتهي الصلاحية."; computing a fresh valid code and submitting
+    it completed sign-in normally. Re-enrolled with a second fresh secret
+    and deliberately submitted 8 more wrong codes in a row from the login
+    form — the combined login+TOTP rate limiting kicked in and blocked
+    further attempts with "تم تجاوز عدد محاولات الدخول المسموح." (see
+    "Known gaps" for why this fires via the general login limiter rather
+    than the dedicated TOTP one in practice). Tested disabling 2FA: a
+    wrong current password was rejected ("كلمة المرور الحالية غير
+    صحيحة."), the correct password succeeded and flipped the status back
+    to "غير مفعّلة". Finally, logged in as `agent@raqaba.local` (never
+    enrolled in 2FA) after all of the above and confirmed it still signs
+    in single-step, completely unaffected.
+
+## Deviations / judgment calls (v5)
+
+- **`otplib` 13.x ships a functional API** (`generateSecret`,
+  `generateURI`, `verify` as top-level exports), not the classic
+  `authenticator` singleton object from older otplib versions that most
+  existing tutorials/snippets reference — confirmed by reading the
+  installed package's own type definitions rather than assuming. `src/lib/totp.ts`
+  is written against the actual installed API.
+- **The forced change-password page intentionally rejects use as a general
+  "change my password" endpoint** — `changePasswordAction` checks
+  `session.user.mustChangePassword` and refuses if it's already `false`.
+  The spec only asked for the first-login-forced case (explicitly "no
+  current password field" because the account holder only knows the temp
+  one), and building a second, weaker path to change a password without
+  proving the current one felt like a real gap worth avoiding rather than
+  silently allowing. A general self-service "change my password while
+  logged in" page (which reasonably *would* want a current-password
+  check) wasn't asked for and wasn't added.
+- **2FA enrollment saves the secret to `User.totpSecret` immediately on
+  generation**, before the confirming code is entered — `totpEnabled`
+  stays `false` until confirmation, so an abandoned enrollment never
+  weakens the account, but it does mean a generated-then-never-confirmed
+  secret sits in the DB until the next "تفعيل المصادقة الثنائية" click
+  overwrites it. Simpler than threading the unconfirmed secret through the
+  UI without ever persisting it, and has no security downside since it's
+  inert without `totpEnabled: true`.
+- **TOTP rate-limit key is `totp:<email>:<ip>`**, a separate bucket from
+  the login limiter's `login:<email>:<ip>`, per the spec's instruction to
+  reuse `checkRateLimit()` "the same way login attempts already are" — see
+  "Known gaps" for why the two buckets mostly overlap in practice given
+  they share a window size and the general limiter counts every
+  submission unconditionally.
+- **`/dashboard/settings` has no permission gate beyond being logged in**,
+  per spec ("reachable by any logged-in staff account") — it only ever
+  touches the signed-in user's own account, so none of the project-scoping
+  or `EffectivePermissions` machinery applies here, unlike almost every
+  other `/dashboard/*` page.
