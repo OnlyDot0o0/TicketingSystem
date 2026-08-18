@@ -140,7 +140,7 @@ export default async function DashboardTicketsPage({
         <input
           name="q"
           defaultValue={searchParams.q}
-          placeholder="بحث برقم التذكرة أو العنوان"
+          placeholder="بحث برقم التذكرة أو العنوان أو الوصف أو الردود"
           className="field sm:col-span-3 lg:col-span-2"
         />
         <select name="status" defaultValue={searchParams.status || ""} className="field">

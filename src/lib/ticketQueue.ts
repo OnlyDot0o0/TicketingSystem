@@ -35,9 +35,27 @@ export function buildTicketQueueWhere(
   else if (filters.assignedToId) where.assignedToId = filters.assignedToId;
   if (filters.tagId) where.tags = { some: { tagId: filters.tagId } };
   if (filters.q) {
+    // Matches ticketNumber/subject (original v1-v6 behavior) plus the
+    // ticket's own description and any message body (agent or submitter,
+    // internal note or not — this is the staff dashboard, everything here
+    // is already visible to the viewer) — a ticket whose subject doesn't
+    // mention the keyword but whose description or a reply does should
+    // still show up. `messages: { some: { ... } }` compiles to a WHERE
+    // EXISTS subquery, not a join, so it can't multiply result rows the
+    // way a naive join would — no `distinct` needed here or in the CSV
+    // export's batched skip/take walk (src/app/dashboard/export.csv/route.ts),
+    // which imports this same builder.
+    //
+    // SQLite's `contains` is a plain LIKE scan (no index, no relevance
+    // ranking) — fine at this app's current scale, not something a real
+    // production/high-volume deployment should keep long-term. See the
+    // "Ticket search" note in README.md for the Postgres tsvector/tsquery
+    // upgrade path once the Postgres migration is actually applied.
     where.OR = [
       { ticketNumber: { contains: filters.q } },
       { subject: { contains: filters.q } },
+      { description: { contains: filters.q } },
+      { messages: { some: { body: { contains: filters.q } } } },
     ];
   }
   // "متأخرة فقط" pushed into the query itself (matches isOverdue's exact
