@@ -7,10 +7,12 @@ as a single-tenant tool for **رقابة+** (RAQABA+), was refactored into a
 canned responses, tags, an activity/audit log, and several security
 hardening features (honeypot, rate limiting, optional CAPTCHA, self-service
 password reset). Later rounds added custom roles and custom ticket-form
-fields (v3), CSAT/bulk actions/CSV export (v4), a hardening pass (v5), and
-most recently (v6) **per-project ticket categories and per-project SLA
-timings**, closing out the last two pieces of ticket-form configuration
-that used to be global.
+fields (v3), CSAT/bulk actions/CSV export (v4), a hardening pass (v5),
+per-project ticket categories and per-project SLA timings (v6), a prepared
+(not-yet-applied) Postgres migration reference schema (v7), and most
+recently (v8) **proactive SLA-breach warning notifications** plus a
+**broadened ticket-queue search** that now also matches ticket descriptions
+and message bodies, not just the ticket number/subject.
 
 ## Multi-project architecture
 
@@ -543,6 +545,136 @@ behavior unless someone explicitly edits it.
   smaller ask than reading an aggregated chart correctly, so the filter
   stays useful even without a single global category list.
 
+## Proactive SLA-breach warning notifications (v8)
+
+`isOverdue()` (`src/lib/sla.ts`) only ever reported a ticket that had
+**already** blown its SLA. This adds an earlier heads-up: an email once a
+ticket's remaining time drops under a threshold, so an agent can act before
+the breach happens, not just get told about it afterward.
+
+- **`Ticket.slaWarningSentAt` (`DateTime?`)** tracks whether a warning has
+  already gone out for the ticket's **current** `slaDueAt` target — so the
+  periodic check (below) never re-sends the same warning every time it
+  runs. It's reset back to `null` any time `slaDueAt` itself changes, so a
+  re-prioritized ticket with a fresh SLA window can warn again instead of
+  staying permanently silenced by an old warning. The only place `slaDueAt`
+  changes after creation is a priority edit in `updateTicketAction`
+  (`src/app/dashboard/tickets/[id]/actions.ts`) — confirmed by search, same
+  as the v6 SLA work confirmed `createTicketAction` was the only place that
+  *computed* one in the first place. There is no bulk priority-change
+  action (`src/app/dashboard/bulk-actions.ts` only has bulk
+  status/assign/tag), so nothing there touches `slaDueAt`.
+  - **Judgment call**: previously, changing a ticket's priority did **not**
+    recompute `slaDueAt` at all — it stayed fixed at whatever the ticket's
+    priority was at creation time, a pre-existing gap this round closed
+    since it's now load-bearing for the re-arm behavior above. When
+    priority changes, `slaDueAt` is recomputed via `computeSlaDueAt()` from
+    the ticket's own `createdAt` (not "now") — so reprioritizing an
+    already-old ticket tightens or loosens its deadline based on how long
+    it's actually been open, rather than handing it a fresh window starting
+    at the moment of the edit. Bumping an old ticket straight to `URGENT`
+    can therefore land `slaDueAt` in the past (immediately overdue) — this
+    was judged the more honest behavior ("this should already have met the
+    urgent bar") than quietly granting a full fresh window on every
+    reprioritization.
+- **Threshold, scaled to each priority's own SLA window** rather than one
+  fixed number of hours for every priority — `needsSlaWarning()`
+  (`src/lib/sla.ts`) works in a *fraction* of the ticket's own
+  `(slaDueAt - createdAt)` gap: warns once remaining time drops to **25%**
+  of that window. A 4-hour `URGENT` ticket and a 5-business-day `LOW`
+  ticket both warn at the same *proportion* of their own window left,
+  instead of sharing one absolute "2 hours left" trigger point. Only fires
+  for tickets that are not `RESOLVED`/`CLOSED`, not already overdue
+  (`isOverdue()`'s territory, not this one), and not already warned for the
+  current `slaDueAt`.
+- **Recipient**: the assigned agent if the ticket has one; otherwise every
+  project member who can see it (`ProjectMembership` + always-include
+  `SUPER_ADMIN`) — the exact same scoping `notifyTicketCreated` already
+  used, factored out into a shared `projectStaffEmails()` helper in
+  `src/lib/notifications.ts` rather than duplicated for
+  `notifySlaWarning()`.
+- **Periodic background check**: `src/lib/slaWarningScheduler.ts` exports
+  `checkSlaWarnings()` (queries open, not-yet-warned, not-yet-overdue
+  tickets, applies `needsSlaWarning()` in-process since the 25%-of-window
+  math mixes wall-clock URGENT hours with business-day HIGH/MEDIUM/LOW
+  windows in a way a single `WHERE` clause can't express cleanly) and
+  `startSlaWarningScheduler()`, which registers a `setInterval` (every 5
+  minutes) exactly once per process. Registered from `src/instrumentation.ts`
+  — Next.js's instrumentation hook, run once when the server process boots.
+  - **Next.js version note**: the instrumentation hook itself has existed
+    since Next 14, but on the installed version here (14.2.15) it still
+    requires `experimental.instrumentationHook: true` in `next.config.js`
+    — it isn't the default until Next 15. Added that flag; without it
+    `src/instrumentation.ts` is silently never loaded.
+  - **Same single-instance caveat as `src/lib/rateLimit.ts`'s in-memory
+    rate limiter** (documented directly in `slaWarningScheduler.ts` too): a
+    `setInterval` living in one server process is correct and sufficient
+    for this single-instance deployment, since the one process running the
+    timer can see every ticket in the one shared database. A real
+    production/multi-instance deploy (several Next.js instances behind a
+    load balancer, or a serverless/edge platform that doesn't keep a
+    long-lived Node process running between requests at all — notably,
+    **this would need rethinking for a Vercel serverless deploy**, since
+    there's no guaranteed always-on process for a `setInterval` to live in)
+    should move this out of the process entirely — a proper external
+    scheduler (cron job / queue worker hitting a dedicated endpoint) — so
+    the check runs once per interval instead of once per instance.
+- **Email content**: `notifySlaWarning()` (`src/lib/notifications.ts`)
+  follows the same `emailShell()` HTML-shell pattern and `text` fallback
+  convention as `notifyResolved()`, so the no-SMTP console-logged output
+  (`[mail:no-op]`) prints the actual ticket number, subject, priority, and
+  due date — not just a subject line.
+
+## Broadened ticket search
+
+`buildTicketQueueWhere()`'s `q` filter (`src/lib/ticketQueue.ts`), shared by
+both `/dashboard` and `/dashboard/export.csv`, previously only matched
+`ticketNumber`/`subject`. It now also matches the ticket's own
+`description` and any `TicketMessage.body` (agent or submitter, internal
+note or not — this is the staff-only dashboard, everything here is already
+visible to the viewer) — a ticket whose subject doesn't mention a keyword
+but whose description or a reply does now still shows up.
+
+- Implemented as one more `OR` branch:
+  `{ messages: { some: { body: { contains: q } } } }`. Prisma compiles a
+  `some` relation filter to a `WHERE EXISTS` subquery, not a join, so it
+  can't multiply result rows the way a naive join would — no `distinct`
+  needed here or in the CSV export's batched `skip`/`take` walk (which
+  imports this exact same builder, so the two views of "the currently
+  filtered set" still can't drift apart). Verified live: a keyword present
+  only in a ticket's description, and one present only in a reply body,
+  both surfaced correctly in `/dashboard` and in a direct fetch of
+  `/dashboard/export.csv` for the same query string.
+- **Not full-text search — still SQLite `LIKE`-based `contains`**, same as
+  the original `ticketNumber`/`subject` matching this extends. No index
+  acceleration, no relevance ranking (results just come back in whatever
+  order `orderBy` was already sorting by, unrelated to how well they
+  match), and no stemming/tokenization — a search for "التذكرة" won't match
+  "تذاكر". Acceptable trade-off at this app's current scale (same
+  reasoning as the CSV export having no row cap yet — see "Scaling"
+  above), but worth being explicit about rather than implying this is
+  real search.
+  - **Upgrade path once the Postgres migration is actually applied**
+    (`prisma/schema.postgres.prisma` — see "Path to real production
+    deploy"): Postgres has real full-text search via `tsvector`/`tsquery`.
+    The concrete shape this would take: add a generated `tsvector` column
+    (or a separate indexed column kept in sync via a trigger) combining
+    `subject`, `description`, and — this is the part `contains` can't do
+    today without a raw join per row — an aggregated `tsvector` of each
+    ticket's message bodies; add a **GIN index** on it; and query with
+    `@@ to_tsquery(...)` (or `websearch_to_tsquery` for a more
+    forgiving/user-friendly query syntax) instead of `contains`, which also
+    unlocks `ts_rank`/`ts_rank_cd` for actually ordering by relevance
+    instead of by `createdAt`/`slaDueAt` as a proxy. Arabic-specific
+    stemming support in Postgres's built-in text search config is limited
+    (there's no built-in Arabic dictionary the way there is for English) —
+    a real deployment serving this app's Arabic-first content would likely
+    want `simple` config (tokenizes without stemming, which for Arabic is
+    often actually preferable to a wrong English-shaped stemmer) or a
+    dedicated Arabic-aware extension, evaluated once Postgres is actually
+    in place rather than guessed at now. Not built in this round — this is
+    a documented future path, not a change to the running SQLite schema.
+
 ## CSAT, bulk actions, CSV export, "my tickets" filter (v4)
 
 Four independent additions to the ticket queue and ticket lifecycle:
@@ -928,13 +1060,16 @@ prisma/schema.postgres.prisma   (v7) reference schema for the eventual Postgres 
                                  validated + client-generated, see "Path to real production deploy"
 prisma/seed.ts                  Seed script (3 users, 3 projects, tickets, memberships)
 src/lib/access.ts               Project-scoped access control (getViewerScope, canAccessProject, ...)
-src/lib/ticketQueue.ts          Shared ticket-queue where/orderBy builder (v4) — used by /dashboard AND /dashboard/export.csv
+src/lib/ticketQueue.ts          Shared ticket-queue where/orderBy builder (v4) — used by /dashboard AND /dashboard/export.csv;
+                                 (v8) q filter also matches description + message bodies
 src/lib/rateLimit.ts            In-memory fixed-window rate limiter
+src/lib/slaWarningScheduler.ts  (v8) Periodic SLA-breach warning check — setInterval registered via src/instrumentation.ts
 src/lib/captcha.ts              Optional hCaptcha/reCAPTCHA v2 support
 src/lib/passwordReset.ts        Hashed, single-use, time-limited reset tokens
 src/lib/totp.ts                 (v5) otplib/qrcode wrapper — secret gen, QR data URI, code verification
 src/lib/                        auth, prisma client, mail, notifications, SLA calc,
                                  upload, config, projects (slug resolution + field-mode types)
+src/instrumentation.ts          (v8) Next.js instrumentation hook — starts the SLA-warning scheduler once on server boot
 src/middleware.ts                protects /dashboard/* behind NextAuth; (v5) also forces
                                  /dashboard/change-password while mustChangePassword is set
 src/app/page.tsx                project directory / picker (home page)
@@ -1016,6 +1151,15 @@ What's actually in place for this:
   above — but actually applying it and confirming real data converts
   cleanly needs a live Postgres server, which wasn't available in this
   environment (no Docker, no native install).
+- (v8) The SLA-warning background scheduler is a `setInterval` in the one
+  long-lived Next.js server process — see "Proactive SLA-breach warning
+  notifications" above for the full single-instance caveat (same class of
+  limitation as the in-memory rate limiter). It would need to move to an
+  external scheduler before a multi-instance or serverless deploy.
+- (v8) Ticket search is still SQLite `LIKE`-based `contains` — no relevance
+  ranking, no stemming. See "Broadened ticket search" above for the
+  Postgres `tsvector`/`tsquery` upgrade path once the Postgres migration is
+  actually applied.
 - File uploads are stored on local disk (`uploads/`) — fine for a single
   server / local dev, but needs to move to object storage (S3/R2) for a
   serverless or multi-instance production deploy.
@@ -1419,3 +1563,119 @@ What's actually in place for this:
   touches the signed-in user's own account, so none of the project-scoping
   or `EffectivePermissions` machinery applies here, unlike almost every
   other `/dashboard/*` page.
+
+## Verification performed (v8 — SLA-breach warnings + broadened search)
+
+- `npx prisma migrate dev` (new migration `add_sla_warning_sent_at`), `npx
+  tsc --noEmit`, and `npm run build` (fresh `.next`) all run clean. Also
+  re-ran `npx prisma validate --schema=prisma/schema.postgres.prisma` and
+  `npx prisma generate --schema=prisma/schema.postgres.prisma` (with a
+  throwaway `DATABASE_URL` override, same as the v7 verification) after
+  adding `slaWarningSentAt` there too — both still pass. Regenerated the
+  real (SQLite) Prisma Client afterward so the running app wasn't left
+  pointed at the Postgres-shaped client.
+- **`experimental.instrumentationHook` was required**: `src/instrumentation.ts`
+  was silently never loaded on the first dev-server run (no
+  `[slaWarningScheduler] started` log line at boot) until this flag was
+  added to `next.config.js` — confirmed by checking the installed Next.js
+  (14.2.15) build source directly (`config-shared.js` defaults
+  `instrumentationHook: false`). After adding the flag, the log line
+  appeared on every server boot, including a fresh `npm run build` (which
+  still succeeds with the flag on).
+- **SLA-breach warning, verified with a script exercising the real exported
+  functions against this app's actual dev.db** (`checkSlaWarnings()` /
+  `notifySlaWarning()` / `computeSlaDueAt()`, imported directly — not
+  reimplemented or mocked), plus real browser interaction for the
+  priority-change path:
+  - Created two `URGENT` tickets on `raqaba` with `createdAt`/`slaDueAt`
+    backdated so remaining time was 12.5% of the 4-hour window (under the
+    25% threshold): one assigned to `agent@raqaba.local`, one unassigned.
+    Running `checkSlaWarnings()` warned both — the assigned ticket's email
+    went to `agent@raqaba.local` **only**; the unassigned ticket's went to
+    every `raqaba` project member (`admin@raqaba.local` as `SUPER_ADMIN`,
+    `agent@raqaba.local`, `newhire@raqaba.local`) and **not** to
+    `testadmin@raqaba.local` or `senioragent@raqaba.local` (both `demo`-only
+    members) — confirming the scoping is project-specific, not
+    platform-wide. `[mail:no-op]` console output showed the ticket number,
+    subject, priority label, and formatted due date for every recipient.
+  - Running `checkSlaWarnings()` again immediately afterward warned
+    neither ticket (`slaWarningSentAt` already set) — no duplicate sends.
+  - **Priority-change re-arm, via the real dashboard UI**: created an
+    `URGENT` ticket on `raqaba` (assigned to `agent@raqaba.local`) with the
+    same under-threshold backdating, logged in as `admin@raqaba.local`,
+    opened `/dashboard/tickets/[id]`, and changed its priority from
+    "عاجلة" to "منخفضة" via the priority `<select>` (the real
+    `updateTicketAction` server action, confirmed via the network request).
+    The SLA due date visibly changed from the URGENT 4-hour target to the
+    LOW 5-business-day target computed from the ticket's own `createdAt`
+    (`createdAt` stayed `18‏/8‏/2026، 7:30 ص`; `slaDueAt` moved from
+    `18‏/8‏/2026، 11:30 ص` to `25‏/8‏/2026، 7:30 ص`), and the activity log
+    recorded "غيّر الأولوية من عاجلة إلى منخفضة". Queried the DB directly
+    afterward and confirmed `slaWarningSentAt` was reset to `null`.
+    Re-tightened the same ticket's window back under threshold and
+    confirmed `checkSlaWarnings()` fired the warning again — the re-arm is
+    real, not just a one-way reset.
+  - All verification tickets deleted afterward; a genuinely near-breach
+    pre-existing seeded ticket (`DEMO-000001`) that the very first
+    `checkSlaWarnings()` run correctly flagged and warned on was reverted
+    back to `slaWarningSentAt: null` afterward to leave the seed data as
+    found (the running dev server's own 5-minute interval will pick it up
+    again naturally if it's still under threshold — this revert was purely
+    for a clean starting state, not a correctness fix).
+- **Broadened search, verified live in the browser and via the CSV export**:
+  created a ticket whose subject/ticket-number don't contain a unique
+  marker string but whose **description** does, and a second ticket whose
+  description also doesn't contain it but whose **reply message body**
+  does. `/dashboard?q=<marker>` listed both tickets. A direct
+  `fetch('/dashboard/export.csv?q=<marker>', {credentials:'include'})` from
+  the browser console returned both rows too, confirming the CSV export's
+  batched `skip`/`take` pagination still works correctly with the widened
+  `where` clause (no missing/duplicated rows, no distinct needed). Both
+  verification tickets deleted afterward.
+
+## Deviations / judgment calls (v8)
+
+- **Priority changes now recompute `slaDueAt`** (previously they didn't —
+  `slaDueAt` was fixed at ticket-creation time regardless of later priority
+  edits, a pre-existing gap this round closed since the warning re-arm
+  behavior needed `slaDueAt` to actually change on a priority edit to be
+  testable/meaningful at all). Recomputed from the ticket's own `createdAt`
+  rather than "now", so an old ticket bumped to `URGENT` can land
+  immediately overdue instead of getting a fresh window — see "Proactive
+  SLA-breach warning notifications" above for the full reasoning.
+- **25% remaining-window threshold** for the SLA warning — not specified
+  exactly, chosen as the suggested reasonable default. Expressed as a
+  named exported constant (`SLA_WARNING_THRESHOLD_FRACTION` in
+  `src/lib/sla.ts`) rather than hardcoded inline, so it's a one-line change
+  if a deployment wants a different value, without needing a full
+  per-project configuration UI for it (unlike the SLA durations themselves,
+  which v6 made per-project — the warning threshold staying a single global
+  fraction was judged proportionate, not asked for as per-project).
+  Deliberately did **not** add a `Project` column for this, to avoid
+  over-building a config surface nothing requested.
+- **5-minute check interval** — not specified, chosen as a reasonable
+  "every few minutes" per the instruction, balancing timeliness against
+  running an extra DB query too often. A named constant
+  (`CHECK_INTERVAL_MS` in `src/lib/slaWarningScheduler.ts`), trivially
+  adjustable.
+- **`experimental.instrumentationHook: true` added to `next.config.js`** —
+  not explicitly requested, but required for `src/instrumentation.ts` to
+  actually load on the installed Next.js version (14.2.15); without it the
+  hook is silently never called and the scheduler never starts. Confirmed
+  necessary by testing without the flag first (no scheduler startup log at
+  all) before adding it.
+- **Unassigned-ticket warning recipients reuse `notifyTicketCreated`'s
+  exact staff query** (project members + `SUPER_ADMIN`), refactored into a
+  shared `projectStaffEmails()` helper rather than copied inline — per the
+  explicit instruction not to reinvent that scoping logic.
+- **Search matches internal notes too** (`TicketMessage.isInternalNote`
+  isn't filtered out) — this is the staff-only dashboard, so anything a
+  search here can surface is already something the viewer's role permits
+  them to see on the ticket detail page; excluding internal notes from
+  search would just make genuinely-visible content harder to find for no
+  real access-control benefit.
+- **Postgres full-text search upgrade path is documented only, not
+  built** — per the instruction to document it in the README without
+  implementing it now. See "Broadened ticket search" above for the
+  concrete `tsvector`/GIN-index/`ts_rank` shape this would take once the
+  Postgres migration (`prisma/schema.postgres.prisma`) is actually applied.
