@@ -1,0 +1,406 @@
+// POSTGRES REFERENCE SCHEMA — not the active schema (see prisma/schema.prisma).
+//
+// This file is not read by any `prisma` command by default (Prisma only
+// auto-loads prisma/schema.prisma). It exists purely as a precise,
+// ready-to-apply reference for the eventual SQLite → Postgres migration,
+// syntax-validated with `npx prisma validate --schema=prisma/schema.postgres.prisma`
+// (see the "Postgres migration" section of README.md for the exact command
+// and what it does and doesn't prove without a live database).
+//
+// Everything below is IDENTICAL to prisma/schema.prisma except:
+//   1. `datasource.provider` is "postgresql" instead of "sqlite".
+//   2. Every String field that was standing in for a fixed, code-defined
+//      enum (SQLite has no enum type) is now a real Prisma `enum`.
+//   3. Ticket.category is DELIBERATELY left as a plain String — as of v6 it
+//      holds a project-defined Category.key, not a fixed set of values, so
+//      it must never become an enum.
+//
+// To actually apply this migration when a real Postgres instance exists:
+//   1. Copy this file's content over prisma/schema.prisma (or diff the two
+//      and hand-apply — they're small enough to do either way).
+//   2. Set DATABASE_URL in .env to the real Postgres connection string.
+//   3. Run `npx prisma migrate dev --name convert_to_postgres` — this both
+//      creates the enum types and converts each existing column's stored
+//      string values into the matching enum value (Prisma generates the
+//      correct ALTER TABLE ... TYPE ... USING ...::text::"EnumName" for
+//      this automatically when the migration is a String → enum change on
+//      an existing column, PROVIDED every value currently stored in that
+//      column is a member of the new enum — which is true here, since the
+//      "allowed values" comments in schema.prisma are exactly what this
+//      enum list was built from; the app has only ever written those exact
+//      strings).
+//   4. Run `npx prisma generate` and redeploy.
+//   5. As a pre-migration safety check on the real production data before
+//      running step 3, it's worth running a quick distinct-values query per
+//      converted column (e.g. `SELECT DISTINCT role FROM "User"`) to
+//      confirm nothing unexpected snuck in — cheap insurance against a
+//      migration failing partway on a legacy/bad row.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum Role {
+  SUPER_ADMIN
+  ADMIN
+  AGENT
+  CUSTOM
+}
+
+enum BaseRole {
+  ADMIN
+  AGENT
+}
+
+enum FieldMode {
+  REQUIRED
+  OPTIONAL
+  HIDDEN
+}
+
+enum RestrictedFieldMode {
+  REQUIRED
+  OPTIONAL
+}
+
+enum CustomFieldType {
+  TEXT
+  TEXTAREA
+  NUMBER
+  DATE
+  SELECT
+  CHECKBOX
+}
+
+enum Priority {
+  LOW
+  MEDIUM
+  HIGH
+  URGENT
+}
+
+enum TicketStatus {
+  NEW
+  OPEN
+  PENDING
+  RESOLVED
+  CLOSED
+}
+
+enum MessageAuthorType {
+  SUBMITTER
+  AGENT
+}
+
+enum TicketActivityAction {
+  STATUS_CHANGED
+  PRIORITY_CHANGED
+  CATEGORY_CHANGED
+  ASSIGNED
+  TAG_ADDED
+  TAG_REMOVED
+}
+
+enum AdminActivityAction {
+  PROJECT_CREATED
+  PROJECT_BRANDING_UPDATED
+  PROJECT_TICKET_FORM_UPDATED
+  PROJECT_SLA_UPDATED
+  PROJECT_MEMBER_ADDED
+  PROJECT_MEMBER_REMOVED
+  ROLE_CREATED
+  ROLE_UPDATED
+  ROLE_DELETED
+  AGENT_CREATED
+  AGENT_ROLE_CHANGED
+  AGENT_ACTIVATED
+  AGENT_DEACTIVATED
+}
+
+enum AdminActivityTargetType {
+  PROJECT
+  ROLE
+  AGENT
+}
+
+model User {
+  id           String   @id @default(cuid())
+  name         String
+  email        String   @unique
+  passwordHash String
+  role         Role     @default(AGENT)
+  customRoleId String?
+  customRole   CustomRole? @relation(fields: [customRoleId], references: [id])
+  active       Boolean  @default(true)
+  createdAt    DateTime @default(now())
+
+  mustChangePassword Boolean @default(false)
+
+  totpSecret  String?
+  totpEnabled Boolean @default(false)
+
+  assignedTickets Ticket[]             @relation("AssignedAgent")
+  memberships     ProjectMembership[]
+  resetTokens     PasswordResetToken[]
+
+  @@index([customRoleId])
+}
+
+model CustomRole {
+  id                       String   @id @default(cuid())
+  name                     String   @unique
+  baseRole                 BaseRole
+  canManageTeam            Boolean  @default(false)
+  canManageTicketForm      Boolean  @default(false)
+  canViewReports           Boolean  @default(false)
+  canManageCannedResponses Boolean  @default(false)
+  createdAt                DateTime @default(now())
+
+  users User[]
+}
+
+model Project {
+  id             String   @id @default(cuid())
+  slug           String   @unique
+  name           String
+  accentColorHex String
+  faqUrl         String?
+  ticketPrefix   String
+  ticketSeq      Int      @default(0)
+  createdAt      DateTime @default(now())
+
+  emailMode          FieldMode           @default(OPTIONAL)
+  contractNumberMode FieldMode           @default(OPTIONAL)
+  categoryMode       RestrictedFieldMode @default(REQUIRED)
+  priorityMode       RestrictedFieldMode @default(REQUIRED)
+  attachmentsMode    FieldMode           @default(OPTIONAL)
+
+  slaUrgentHours Int @default(4)
+  slaHighDays    Int @default(1)
+  slaMediumDays  Int @default(3)
+  slaLowDays     Int @default(5)
+
+  tickets         Ticket[]
+  memberships     ProjectMembership[]
+  cannedResponses CannedResponse[]
+  tags            Tag[]
+  customFields    CustomField[]
+  categories      Category[]
+}
+
+model Category {
+  id        String   @id @default(cuid())
+  projectId String
+  project   Project  @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  key       String
+  label     String
+  order     Int      @default(0)
+  createdAt DateTime @default(now())
+
+  @@unique([projectId, key])
+  @@index([projectId])
+}
+
+model CustomField {
+  id        String          @id @default(cuid())
+  projectId String
+  project   Project         @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  key       String
+  label     String
+  fieldType CustomFieldType
+  required  Boolean         @default(false)
+  options   String?
+  order     Int             @default(0)
+  createdAt DateTime        @default(now())
+
+  values TicketFieldValue[]
+
+  @@unique([projectId, key])
+  @@index([projectId])
+}
+
+model TicketFieldValue {
+  id            String      @id @default(cuid())
+  ticketId      String
+  ticket        Ticket      @relation(fields: [ticketId], references: [id], onDelete: Cascade)
+  customFieldId String
+  customField   CustomField @relation(fields: [customFieldId], references: [id], onDelete: Cascade)
+  value         String
+
+  @@unique([ticketId, customFieldId])
+  @@index([ticketId])
+  @@index([customFieldId])
+}
+
+model ProjectMembership {
+  id        String   @id @default(cuid())
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  projectId String
+  project   Project  @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  createdAt DateTime @default(now())
+
+  @@unique([userId, projectId])
+  @@index([userId])
+  @@index([projectId])
+}
+
+model CannedResponse {
+  id        String   @id @default(cuid())
+  projectId String
+  project   Project  @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  title     String
+  body      String
+  createdBy String
+  createdAt DateTime @default(now())
+
+  @@index([projectId])
+}
+
+model Tag {
+  id        String      @id @default(cuid())
+  projectId String
+  project   Project     @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  name      String
+  colorHex  String?
+  createdAt DateTime    @default(now())
+  tickets   TicketTag[]
+
+  @@unique([projectId, name])
+  @@index([projectId])
+}
+
+model TicketTag {
+  ticketId  String
+  ticket    Ticket   @relation(fields: [ticketId], references: [id], onDelete: Cascade)
+  tagId     String
+  tag       Tag      @relation(fields: [tagId], references: [id], onDelete: Cascade)
+  createdAt DateTime @default(now())
+
+  @@id([ticketId, tagId])
+  @@index([tagId])
+}
+
+model TicketActivity {
+  id        String               @id @default(cuid())
+  ticketId  String
+  ticket    Ticket               @relation(fields: [ticketId], references: [id], onDelete: Cascade)
+  actorName String
+  action    TicketActivityAction
+  fromValue String?
+  toValue   String?
+  createdAt DateTime             @default(now())
+
+  @@index([ticketId])
+}
+
+model AdminActivity {
+  id          String                   @id @default(cuid())
+  actorName   String
+  action      AdminActivityAction
+  targetType  AdminActivityTargetType
+  targetLabel String
+  fromValue   String?
+  toValue     String?
+  createdAt   DateTime                 @default(now())
+
+  @@index([createdAt])
+  @@index([action])
+}
+
+model PasswordResetToken {
+  id        String    @id @default(cuid())
+  userId    String
+  user      User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  tokenHash String    @unique
+  expiresAt DateTime
+  usedAt    DateTime?
+  createdAt DateTime  @default(now())
+
+  @@index([userId])
+}
+
+model Ticket {
+  id           String       @id @default(cuid())
+  ticketNumber String       @unique
+  subject      String
+  description  String
+  // Deliberately NOT an enum (unlike priority/status below) — as of v6
+  // this holds a project-defined Category.key, a dynamic per-project value
+  // set, not a fixed code-level enum. Converting this to an enum would be
+  // wrong, not just unnecessary.
+  category     String
+  priority     Priority     @default(MEDIUM)
+  status       TicketStatus @default(NEW)
+
+  projectId String
+  project   Project @relation(fields: [projectId], references: [id])
+
+  submitterName  String
+  submitterPhone String
+  submitterEmail String?
+  contractNumber String?
+
+  assignedToId String?
+  assignedTo   User?   @relation("AssignedAgent", fields: [assignedToId], references: [id])
+
+  slaDueAt   DateTime
+  createdAt  DateTime  @default(now())
+  updatedAt  DateTime  @updatedAt
+  resolvedAt DateTime?
+
+  satisfactionRating      Int?
+  satisfactionSubmittedAt DateTime?
+
+  messages    TicketMessage[]
+  attachments Attachment[]
+  tags        TicketTag[]
+  activities  TicketActivity[]
+  fieldValues TicketFieldValue[]
+
+  @@index([status])
+  @@index([category])
+  @@index([priority])
+  @@index([assignedToId])
+  @@index([submitterPhone])
+  @@index([projectId])
+  @@index([projectId, createdAt])
+  @@index([projectId, status])
+  @@index([projectId, slaDueAt])
+}
+
+model TicketMessage {
+  id             String            @id @default(cuid())
+  ticketId       String
+  ticket         Ticket            @relation(fields: [ticketId], references: [id], onDelete: Cascade)
+  authorType     MessageAuthorType
+  authorName     String
+  isInternalNote Boolean           @default(false)
+  body           String
+  createdAt      DateTime          @default(now())
+
+  attachments Attachment[]
+
+  @@index([ticketId])
+}
+
+model Attachment {
+  id        String         @id @default(cuid())
+  ticketId  String
+  ticket    Ticket         @relation(fields: [ticketId], references: [id], onDelete: Cascade)
+  messageId String?
+  message   TicketMessage? @relation(fields: [messageId], references: [id], onDelete: Cascade)
+  filename  String
+  path      String
+  mimeType  String
+  size      Int
+  createdAt DateTime       @default(now())
+
+  @@index([ticketId])
+  @@index([messageId])
+}

@@ -872,18 +872,39 @@ local dev) and fill in real values for production:
 
 1. **Host**: Deploy to Vercel (or any Node host).
 2. **Database**: Provision a hosted Postgres (Neon, Supabase, RDS, etc.).
-   In `prisma/schema.prisma`, change:
-   ```prisma
-   datasource db {
-     provider = "postgresql"   // was "sqlite"
-     url      = env("DATABASE_URL")
-   }
+   A complete, ready-to-apply reference schema for this already exists at
+   **`prisma/schema.postgres.prisma`** — it's identical to the active
+   `prisma/schema.prisma` except `datasource.provider` is `"postgresql"`
+   and every String field that was standing in for a fixed enum (SQLite
+   has no native enum type) is a real Prisma `enum`. `Ticket.category` is
+   deliberately left as a plain String in both — as of v6 it holds a
+   project-defined `Category.key`, not a fixed set of values, so it must
+   never become an enum.
+
+   This reference file isn't auto-loaded by any `prisma` command (only
+   `prisma/schema.prisma` is), so it can't accidentally affect the running
+   SQLite app. It HAS been verified two real ways without needing a live
+   Postgres connection:
+   ```bash
+   npx prisma validate --schema=prisma/schema.postgres.prisma   # schema is syntactically/semantically valid
+   npx prisma generate --schema=prisma/schema.postgres.prisma   # a full, real Prisma Client compiles from it
    ```
-   Point `DATABASE_URL` at the new Postgres instance, then run
-   `npx prisma migrate deploy`. (Optional cleanup once on Postgres: convert
-   the string-typed "enum-like" fields into real Prisma `enum` types —
-   SQLite doesn't support native enums, which is why they're modeled as
-   validated strings for now.)
+   Both succeeded. What this does NOT prove: that a real Postgres server
+   accepts the generated migration SQL and that existing data converts
+   cleanly — that needs an actual instance. To apply for real:
+   1. Copy `prisma/schema.postgres.prisma`'s content over
+      `prisma/schema.prisma` (they're small enough to diff/reconcile by
+      hand if `schema.prisma` has drifted since this was written).
+   2. Point `DATABASE_URL` at the real Postgres instance.
+   3. Run `npx prisma migrate dev --name convert_to_postgres`. Prisma
+      generates the `ALTER TABLE ... TYPE "EnumName" USING ...` for each
+      converted column automatically — this works cleanly because every
+      value ever written to those columns is already a member of the new
+      enum (the enum lists were built directly from this schema's own
+      documented "allowed values"). As cheap insurance before running this
+      against real production data, spot-check with something like
+      `SELECT DISTINCT role FROM "User"` per converted column first.
+   4. Run `npx prisma generate` and redeploy.
 3. **File storage**: `uploads/` is local disk, which doesn't persist across
    most serverless deploys. For production, swap `src/lib/upload.ts` to
    write to S3/R2/Blob storage instead of the local filesystem.
@@ -903,6 +924,8 @@ local dev) and fill in real values for production:
 
 ```
 prisma/schema.prisma            Data model (SQLite now, Postgres-ready)
+prisma/schema.postgres.prisma   (v7) reference schema for the eventual Postgres move — real enums,
+                                 validated + client-generated, see "Path to real production deploy"
 prisma/seed.ts                  Seed script (3 users, 3 projects, tickets, memberships)
 src/lib/access.ts               Project-scoped access control (getViewerScope, canAccessProject, ...)
 src/lib/ticketQueue.ts          Shared ticket-queue where/orderBy builder (v4) — used by /dashboard AND /dashboard/export.csv
@@ -987,6 +1010,12 @@ What's actually in place for this:
   every project's 'الأداء'-equivalent category at once" option, since
   categories are independent per-project strings with no cross-project
   identity.
+- (v7) Still running on SQLite. The Postgres migration path is now fully
+  prepared and verified as far as possible without a real instance — see
+  `prisma/schema.postgres.prisma` and "Path to real production deploy"
+  above — but actually applying it and confirming real data converts
+  cleanly needs a live Postgres server, which wasn't available in this
+  environment (no Docker, no native install).
 - File uploads are stored on local disk (`uploads/`) — fine for a single
   server / local dev, but needs to move to object storage (S3/R2) for a
   serverless or multi-instance production deploy.
