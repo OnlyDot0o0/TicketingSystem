@@ -927,6 +927,141 @@ each holding their own `Map` don't coordinate at all.
   in production — same "verify before you trust it" caveat as the S3
   storage driver and the Postgres migration path.
 
+## Error tracking hooks (Sentry-ready, no-op until configured) (v9)
+
+`@sentry/nextjs` is wired in as an integration point, same
+graceful-degradation pattern as SMTP/CAPTCHA/object storage/rate limiting:
+completely inert — no SDK initialization, nothing sent anywhere — until a
+DSN env var is set.
+
+- **`src/lib/sentry.ts`** is the one module everything else funnels
+  through: `isSentryConfigured()`, `initSentry()` (idempotent), and
+  `captureException(err, extra?)` — the function actually called from every
+  other file below. When unconfigured, `captureException` doesn't call into
+  the Sentry SDK at all; it just `console.error`s the error locally (same
+  "log instead of silently losing it" spirit as `mail.ts`'s no-SMTP
+  console fallback), so error visibility in an unconfigured environment is
+  no worse than before this integration existed.
+- **Two DSN env vars**, because Next.js only inlines `NEXT_PUBLIC_`-prefixed
+  vars into the browser bundle: `SENTRY_DSN` (read server/edge-side) and
+  `NEXT_PUBLIC_SENTRY_DSN` (read client-side). A real deployment normally
+  sets both to the same value. `isSentryConfigured()` checks both — whichever
+  one actually resolves in a given bundle is used; the other is always
+  `undefined` there and simply ignored.
+- **Standard `@sentry/nextjs` manual-setup file layout** (same files
+  `npx @sentry/wizard` would normally generate, written by hand here since
+  the wizard itself talks to a real Sentry account to run):
+  - `sentry.server.config.ts` / `sentry.edge.config.ts` (project root) —
+    each just calls `initSentry()`. Imported from `src/instrumentation.ts`'s
+    `register()`, per runtime (`NEXT_RUNTIME === "nodejs"` vs. `"edge"` —
+    `src/middleware.ts` runs on the edge runtime), alongside the existing
+    SLA-warning-scheduler startup that already lived there.
+  - `sentry.client.config.ts` (project root) — also just calls
+    `initSentry()`; auto-injected into the browser bundle by
+    `withSentryConfig()` in `next.config.js`. (Newer Next.js/`@sentry/nextjs`
+    versions prefer an `instrumentation-client.ts` file instead — the
+    installed SDK (v10) logs a deprecation notice about this at dev-server
+    boot, but `sentry.client.config.ts` is still the correct, working
+    convention for the Next.js version actually installed here, 14.2.15.)
+  - `next.config.js` wrapped with `withSentryConfig()`, with `telemetry:
+    false` and no `authToken`/`org`/`project` set by default — verified
+    (see below) that this doesn't make the build depend on reaching
+    Sentry's API at all when unconfigured; it just skips source-map upload.
+- **Error boundaries actually wired up**:
+  - **`src/app/global-error.tsx`** — Next.js App Router's root-level,
+    last-resort error boundary (has to render its own `<html>`/`<body>`
+    since it can replace the root layout itself). Arabic fallback UI
+    matching this app's existing card/button styling, reports via
+    `captureException` in a `useEffect`.
+  - **`src/app/dashboard/error.tsx`** — a route-segment boundary scoped to
+    `/dashboard` specifically (the spec's "ideally... for the dashboard"),
+    so an error there doesn't take down the public ticket-submission pages.
+    Same reporting, plus a "إعادة المحاولة" (retry, calls `reset()`) button
+    and a link back to the ticket queue.
+  - Both boundaries catch errors thrown while rendering — including ones
+    surfaced from a Server Action's re-render pass — which is most of what
+    "uncaught errors in server actions" means in the App Router: this
+    codebase's server actions already catch their own expected-failure
+    cases and return `{ error: "..." }` (the existing pattern throughout
+    this app, e.g. every `*Action` in `src/app/**/actions.ts`), so a real
+    *uncaught* exception from one (a genuine bug, not a validation
+    rejection) is exactly the case these boundaries exist for.
+  - **`src/app/dashboard/export.csv/route.ts`** — the one Route Handler in
+    this app that had no error handling of any kind before this round
+    (`src/app/api/uploads/[...path]/route.ts` already fully catches its own
+    errors and returns 404; NextAuth's own `api/auth/[...nextauth]` handler
+    is vendor code, left alone). Now wrapped in a top-level try/catch that
+    reports via `captureException` and rethrows, plus the same reporting
+    inside its streaming body's existing catch block. Deliberately
+    **excludes** Next.js's own internal control-flow "errors"
+    (`notFound()`/`redirect()`, and `DYNAMIC_SERVER_USAGE` — the signal
+    Next throws internally while probing whether a route could be
+    statically pre-rendered) via a new `isNextControlFlowError()` helper in
+    `src/lib/sentry.ts`, so a normal 404/redirect is never misreported as a
+    bug. (Next 14.2.15 doesn't yet export the official `unstable_rethrow`
+    helper for this, added in a later release — this checks the same
+    `digest` convention that helper is documented to check.)
+  - Every other server action/route handler in the app is **not**
+    individually wrapped — retrofitting `try/catch` + `captureException`
+    into dozens of existing actions was judged more invasive than this
+    round's "hooks that no-op until configured" framing called for; the
+    two boundary components above are the actual safety net for anything
+    that slips through.
+- **What Sentry.init() is called with**: just `{ dsn, tracesSampleRate: 0,
+  debug: false }` — tracing/performance monitoring is a separate opt-in
+  concern from "capture uncaught errors" and wasn't asked for, so it's off
+  by default (a deployment that wants it can raise `tracesSampleRate`).
+
+**Verified vs. reasoned about:**
+
+- **Verified live, against the real dev server, with NO Sentry env vars
+  set (the default, zero-config state — the case that matters most)**:
+  `npx tsc --noEmit` and a fresh `npm run build` both pass; the dev server
+  boots normally (the pre-existing `[slaWarningScheduler] started` log line
+  still appears, confirming `instrumentation.ts`'s `register()` still runs
+  correctly with the new Sentry import added alongside it); the home page,
+  login, and dashboard all load and work exactly as before. Also
+  **triggered a real error in a dashboard page** (a temporary throw, logged
+  in and reproduced against a real ticket queue, then removed) and
+  confirmed `src/app/dashboard/error.tsx` rendered its Arabic fallback UI
+  and the browser console showed `[sentry:no-op]` with the error and
+  boundary tag — proving the whole chain (React error boundary → `useEffect`
+  → `captureException` → no-op) actually runs end-to-end, not just that it
+  type-checks. Also confirmed `/dashboard/export.csv` still returns a
+  correct CSV (BOM + Arabic headers intact) after being wrapped in
+  try/catch, and — critically — that the wrapping didn't start
+  misreporting `DYNAMIC_SERVER_USAGE` (Next's own internal build-time
+  probe signal for that always-dynamic route) as a real error; this was
+  actually caught by running a real `npm run build` first, which logged a
+  spurious `[sentry:no-op]` for exactly that reason before
+  `isNextControlFlowError()` was widened to exclude it.
+- **Verified with a fake (non-functional) DSN, without a real Sentry
+  project**: `Sentry.init()` and `captureException()` both run without
+  throwing or hanging when a syntactically-valid DSN IS set (confirmed with
+  a one-off script) — `captureException` returns in ~17ms, confirming it's
+  fire-and-forget and never blocks the caller waiting on a network response.
+  This proves the "configured" code path is wired up correctly and doesn't
+  break anything; it does **not** and cannot prove events actually arrive
+  at a real Sentry project, since no real DSN/account was available in this
+  environment.
+- **NOT verified (needs a real Sentry project)**: that an event sent with a
+  real DSN actually shows up in the Sentry dashboard, with correct
+  metadata/grouping/source-mapped stack traces. Source-map upload
+  specifically also needs `SENTRY_AUTH_TOKEN` + `SENTRY_ORG` +
+  `SENTRY_PROJECT` (unset by default here) to produce readable stack traces
+  for minified production code — without it, a real deployment would still
+  receive events, just with minified/unmapped stack traces.
+- **Known cost, worth being upfront about**: the client bundle grew from
+  ~87 KB to ~160 KB shared First Load JS, and the middleware bundle from
+  ~121 KB to ~186 KB, after adding `@sentry/nextjs` — the SDK ships in the
+  bundle regardless of whether a DSN is set at runtime (the bundler can't
+  know that ahead of time), so this size cost applies even in the fully
+  unconfigured default state. Worth confirming is an acceptable trade-off
+  before deploying, not something this round tried to hide.
+- **Env vars**: `SENTRY_DSN` (server/edge), `NEXT_PUBLIC_SENTRY_DSN`
+  (client) — both unset by default. Optionally `SENTRY_ORG`,
+  `SENTRY_PROJECT`, `SENTRY_AUTH_TOKEN` for source-map upload at build time.
+
 ## CSAT, bulk actions, CSV export, "my tickets" filter (v4)
 
 Four independent additions to the ticket queue and ticket lifecycle:
@@ -1178,6 +1313,14 @@ back it.
 - **nodemailer** for email notifications (ticket lifecycle + password
   reset) — degrades gracefully (logs to console instead of crashing) when
   SMTP env vars aren't set
+- (v9) **`@aws-sdk/client-s3`** — optional S3-compatible attachment storage
+  driver, unused unless `STORAGE_DRIVER=s3`
+- (v9) **`ioredis`** — optional shared rate-limit backend, unused unless
+  `REDIS_URL` is set
+- (v9) **`@sentry/nextjs`** — optional error tracking, inert unless
+  `SENTRY_DSN`/`NEXT_PUBLIC_SENTRY_DSN` is set (see "Error tracking hooks"
+  above for the real, non-trivial bundle-size cost of just having it
+  installed, even unconfigured)
 
 ## Two kinds of users
 
@@ -1255,6 +1398,9 @@ local dev) and fill in real values for production:
 | `STORAGE_DRIVER` | no | (v9) `local` (default) or `s3`. See "Object storage abstraction" above. |
 | `S3_BUCKET`, `S3_REGION`, `S3_ACCESS_KEY_ID`, `S3_SECRET_ACCESS_KEY` | only if `STORAGE_DRIVER=s3` | Required together when the S3 driver is selected. |
 | `S3_ENDPOINT`, `S3_FORCE_PATH_STYLE` | no | Optional even with `STORAGE_DRIVER=s3` — set `S3_ENDPOINT` for R2/MinIO (omit for real AWS S3), `S3_FORCE_PATH_STYLE=true` if your provider needs path-style addressing. |
+| `REDIS_URL` | no | (v9) Set to switch `src/lib/rateLimit.ts` to the Redis-backed limiter. See "Redis-backed rate limiting" above. |
+| `SENTRY_DSN`, `NEXT_PUBLIC_SENTRY_DSN` | no | (v9) Server/edge and client DSNs respectively (usually the same value). See "Error tracking hooks" above. |
+| `SENTRY_ORG`, `SENTRY_PROJECT`, `SENTRY_AUTH_TOKEN` | no | (v9) Only needed for source-map upload at build time; without them the build just skips that step. |
 
 ## Path to real production deploy
 
@@ -1331,7 +1477,11 @@ src/lib/passwordReset.ts        Hashed, single-use, time-limited reset tokens
 src/lib/totp.ts                 (v5) otplib/qrcode wrapper — secret gen, QR data URI, code verification
 src/lib/                        auth, prisma client, mail, notifications, SLA calc,
                                  upload, config, projects (slug resolution + field-mode types)
-src/instrumentation.ts          (v8) Next.js instrumentation hook — starts the SLA-warning scheduler once on server boot
+src/instrumentation.ts          (v8) Next.js instrumentation hook — starts the SLA-warning scheduler; (v9) also initializes Sentry per-runtime
+src/lib/sentry.ts               (v9) Sentry init/captureException, no-op until SENTRY_DSN/NEXT_PUBLIC_SENTRY_DSN is set
+sentry.server.config.ts, sentry.edge.config.ts, sentry.client.config.ts   (v9) @sentry/nextjs's standard config-file convention
+src/app/global-error.tsx        (v9) root-level React error boundary, reports via src/lib/sentry.ts
+src/app/dashboard/error.tsx     (v9) dashboard-scoped React error boundary, same reporting
 src/middleware.ts                protects /dashboard/* behind NextAuth; (v5) also forces
                                  /dashboard/change-password while mustChangePassword is set
 src/app/page.tsx                project directory / picker (home page)
@@ -1509,6 +1659,22 @@ What's actually in place for this:
   time", not silently rewrite itself when the underlying row changes
   later) but worth knowing if you expected it to always reflect current
   names.
+- (v9) Sentry error tracking is wired up but only ever exercised with a
+  fake DSN (no real Sentry project available) — see "Error tracking hooks"
+  above. Most existing server actions still handle their own expected
+  failures internally (returning `{ error: "..." }`, this app's existing
+  pattern) rather than being individually wrapped with `captureException` —
+  only the two React error boundaries (`global-error.tsx`,
+  `dashboard/error.tsx`) and the one previously-unprotected route handler
+  (`export.csv`) are. A genuinely uncaught exception elsewhere in a route
+  handler (not `export.csv`, not `api/uploads`, which already fully
+  handles its own errors) would still reach Next's default error handling
+  without a Sentry report, since Next 14.2.15 doesn't support the
+  `onRequestError` instrumentation hook that would otherwise catch those
+  automatically (added in a later Next.js release).
+- (v9) Installing `@sentry/nextjs` grew the shared client bundle from ~87 KB
+  to ~160 KB and middleware from ~121 KB to ~186 KB, even with no DSN set —
+  the SDK ships in the bundle either way. Worth weighing before adopting.
 
 ## Verification performed
 

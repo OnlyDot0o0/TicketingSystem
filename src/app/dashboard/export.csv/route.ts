@@ -4,6 +4,7 @@ import { requireScopedViewer } from "@/lib/access";
 import { buildTicketQueueWhere, buildTicketQueueOrderBy, TicketQueueFilters } from "@/lib/ticketQueue";
 import { PRIORITY_LABELS, STATUS_LABELS } from "@/lib/config";
 import { Prisma } from "@prisma/client";
+import { captureException, isNextControlFlowError } from "@/lib/sentry";
 
 // CSV export of the ticket queue's CURRENTLY FILTERED result set — the
 // exact same `where`/`orderBy` construction as /dashboard
@@ -63,7 +64,26 @@ function csvLine(cells: string[]): string {
   return cells.map(csvEscapeCell).join(",");
 }
 
+// (v9) This handler had no top-level error handling at all before — an
+// unexpected failure (e.g. a DB connectivity blip) would propagate
+// uncaught to Next's default error handling with nothing recorded
+// anywhere. Wrapped here to report to Sentry (no-op until configured, see
+// src/lib/sentry.ts) while leaving the actual response behavior
+// unchanged — Next's own notFound()/redirect() control-flow "errors" from
+// requireScopedViewer()/buildTicketQueueWhere() are explicitly excluded
+// (see isNextControlFlowError) so a normal 404/redirect never gets
+// reported as if it were a bug.
 export async function GET(req: NextRequest) {
+  try {
+    return await handleExport(req);
+  } catch (err) {
+    if (isNextControlFlowError(err)) throw err;
+    captureException(err, { route: "/dashboard/export.csv" });
+    throw err;
+  }
+}
+
+async function handleExport(req: NextRequest) {
   const scope = await requireScopedViewer();
 
   const sp = req.nextUrl.searchParams;
@@ -133,6 +153,11 @@ export async function GET(req: NextRequest) {
         }
         controller.close();
       } catch (err) {
+        // This is inside the stream body, past the point where the outer
+        // try/catch in GET() above could still catch it (the Response has
+        // already been returned) — reported here instead, same no-op-until-
+        // configured Sentry helper.
+        captureException(err, { route: "/dashboard/export.csv", stage: "streaming" });
         controller.error(err);
       }
     },
