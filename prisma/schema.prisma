@@ -360,6 +360,17 @@ model Ticket {
   updatedAt  DateTime  @updatedAt
   resolvedAt DateTime?
 
+  // Proactive SLA-breach WARNING (as opposed to isOverdue(), which only
+  // reports AFTER the breach) — set to the timestamp the warning email was
+  // sent, so the periodic check (src/lib/slaWarningScheduler.ts) never
+  // re-sends the same warning on every run. Tracks the warning for the
+  // ticket's CURRENT slaDueAt target specifically: it's reset back to null
+  // any time slaDueAt changes (e.g. a priority change recalculates it —
+  // see updateTicketAction in src/app/dashboard/tickets/[id]/actions.ts),
+  // so a re-prioritized ticket with a fresh SLA window can warn again
+  // instead of staying permanently silenced by an old warning.
+  slaWarningSentAt DateTime?
+
   // CSAT (customer satisfaction) rating, 1-5. Collected via a one-click
   // link in the "resolved" notification email (/csat/[ticketId]?rating=N).
   // Modeled directly on Ticket, same as resolvedAt, since it's a single

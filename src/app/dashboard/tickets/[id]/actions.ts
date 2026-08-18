@@ -8,6 +8,7 @@ import { notifyAgentReply, notifyResolved } from "@/lib/notifications";
 import { STATUS_LABELS, PRIORITY_LABELS } from "@/lib/config";
 import { validateCustomFieldValue } from "@/lib/customFields";
 import { categoryLabel } from "@/lib/categories";
+import { computeSlaDueAt, PriorityLevel } from "@/lib/sla";
 import { revalidatePath } from "next/cache";
 
 export type AgentReplyState = { error?: string };
@@ -123,6 +124,16 @@ export async function updateTicketAction(formData: FormData) {
   if (priority && priority !== ticket.priority) {
     data.priority = priority;
     activities.push({ action: "PRIORITY_CHANGED", fromValue: PRIORITY_LABELS[ticket.priority] || ticket.priority, toValue: PRIORITY_LABELS[priority] || priority });
+    // Priority drives the SLA target (src/lib/sla.ts) — recompute the due
+    // date from this ticket's own createdAt (not "now"), so reprioritizing
+    // an already-old ticket tightens/loosens its deadline based on how long
+    // it's actually been open, rather than handing it a fresh window
+    // starting at the moment of the change. Clearing slaWarningSentAt
+    // re-arms the SLA-breach warning for the new target — a warning already
+    // sent for the OLD due date says nothing about whether the ticket is
+    // within threshold of the new one.
+    data.slaDueAt = computeSlaDueAt(priority as PriorityLevel, ticket.project, ticket.createdAt);
+    data.slaWarningSentAt = null;
   }
   if (category && category !== ticket.category) {
     // Categories are per-project (v6) — re-validate the submitted key

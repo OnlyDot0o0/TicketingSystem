@@ -354,6 +354,11 @@ model Ticket {
   updatedAt  DateTime  @updatedAt
   resolvedAt DateTime?
 
+  // See prisma/schema.prisma for the full comment — set when the proactive
+  // SLA-breach warning email has been sent for the ticket's CURRENT
+  // slaDueAt target; reset to null whenever slaDueAt changes.
+  slaWarningSentAt DateTime?
+
   satisfactionRating      Int?
   satisfactionSubmittedAt DateTime?
 
