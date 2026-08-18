@@ -53,8 +53,15 @@ export async function sendMail(opts: {
 }
 
 export function emailShell(bodyHtml: string, projectName: string) {
+  // Without a viewport meta tag, mobile mail clients that don't do their own
+  // reflow (notably iOS/macOS Mail) render HTML email at a virtual desktop
+  // width (~980px) and scale the whole thing down to fit the screen — every
+  // tap target (e.g. notifyResolved's CSAT star links below) shrinks along
+  // with it. Most of this app's ticket submitters are on phones, so this
+  // matters here more than it would for a typically desktop-read app.
   return `<!doctype html>
 <html dir="rtl" lang="ar">
+  <head><meta name="viewport" content="width=device-width, initial-scale=1" /></head>
   <body style="font-family: Tahoma, Arial, sans-serif; background:#F2F4F1; padding:24px; color:#16221F;">
     <div style="max-width:520px;margin:0 auto;background:#FFFFFF;border:1px solid #D3DBD4;border-radius:12px;padding:24px;">
       <div style="color:#276661;font-weight:bold;font-size:18px;margin-bottom:16px;">${projectName} مساعدة الدعم الفني</div>

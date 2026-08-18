@@ -118,10 +118,15 @@ export async function notifyResolved(
   if (!ticket.submitterEmail) return;
   const trackUrl = `${APP_BASE_URL}/${project.slug}/tickets/track`;
   const csatBaseUrl = `${APP_BASE_URL}/csat/${ticket.id}`;
+  // padding:12px 14px (up from an earlier, tighter 6px 10px) so each star
+  // link is closer to a real ~44px mobile tap target — most submitters open
+  // this email on a phone, and email clients ignore the emailShell()
+  // viewport meta tag's help with scaling if the target was too small to
+  // begin with.
   const ratingLinks = [1, 2, 3, 4, 5]
     .map(
       (n) =>
-        `<a href="${csatBaseUrl}?rating=${n}" style="display:inline-block;margin:2px 4px;padding:6px 10px;border:1px solid #D3DBD4;border-radius:8px;color:#276661;text-decoration:none;font-size:16px;white-space:nowrap;">${"⭐".repeat(n)}</a>`
+        `<a href="${csatBaseUrl}?rating=${n}" style="display:inline-block;margin:4px;padding:12px 14px;border:1px solid #D3DBD4;border-radius:8px;color:#276661;text-decoration:none;font-size:16px;line-height:1;white-space:nowrap;">${"⭐".repeat(n)}</a>`
     )
     .join("");
   await sendMail({

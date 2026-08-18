@@ -9,10 +9,14 @@ hardening features (honeypot, rate limiting, optional CAPTCHA, self-service
 password reset). Later rounds added custom roles and custom ticket-form
 fields (v3), CSAT/bulk actions/CSV export (v4), a hardening pass (v5),
 per-project ticket categories and per-project SLA timings (v6), a prepared
-(not-yet-applied) Postgres migration reference schema (v7), and most
-recently (v8) **proactive SLA-breach warning notifications** plus a
-**broadened ticket-queue search** that now also matches ticket descriptions
-and message bodies, not just the ticket number/subject.
+(not-yet-applied) Postgres migration reference schema (v7), (v8) **proactive
+SLA-breach warning notifications** plus a **broadened ticket-queue search**
+that now also matches ticket descriptions and message bodies, and most
+recently (v9) a **mobile UX pass** on the public ticket flows, a **pluggable
+object-storage abstraction** for attachments (local disk, unchanged by
+default, or S3-compatible), a **Redis-backed rate limiter** (with the
+existing in-memory limiter kept as the zero-config fallback), and **Sentry
+error-tracking hooks** that no-op until configured.
 
 ## Multi-project architecture
 
@@ -674,6 +678,70 @@ but whose description or a reply does now still shows up.
     dedicated Arabic-aware extension, evaluated once Postgres is actually
     in place rather than guessed at now. Not built in this round — this is
     a documented future path, not a change to the running SQLite schema.
+
+## Mobile UX pass on public flows (v9)
+
+The primary submitters of tickets are field contractors on phones, not the
+internal support team (who use `/dashboard` on a desktop) — so this round
+specifically audited the three public, unauthenticated pages a contractor
+actually touches: `/{slug}` (project landing), `/{slug}/tickets/new` (the
+submission form — the highest-field-count page, including dynamic custom
+fields and category/priority selects), and `/{slug}/tickets/track`
+(lookup + reply + attachments). Checked live in a real browser at a 375px
+mobile viewport (not just by reading Tailwind classes), inspecting actual
+rendered element geometry (`getBoundingClientRect()`) for touch-target
+size, wrapping, and horizontal overflow — the same class of check a manual
+mobile QA pass would do, just automated instead of eyeballed.
+
+- **Most of the form surface was already fine.** `.field`/`.btn` (global
+  `src/app/globals.css`) already render at ~43–49px tall on a 375px
+  viewport (close to the 44px mobile tap-target guideline) with no
+  horizontal overflow on any of the three pages, and the `sm:grid-cols-2`
+  layouts on `NewTicketForm.tsx` / the track page's lookup form correctly
+  collapse to a single column below Tailwind's `sm` breakpoint (640px), so
+  nothing was actually broken there — confirmed by measurement, not
+  assumed, since the spec asked not to redesign what already works.
+- **Fixed: header/footer nav links had a much smaller tap target than
+  everything else on the page** (`src/components/PublicShell.tsx`). The
+  footer's "الأسئلة الشائعة" / "دخول فريق الدعم" links were plain text with
+  no padding — measured **16px tall** (just the line-height, nothing else)
+  vs. ~43px+ for every form control on the same pages. The header's "تتبع
+  تذكرتك" link measured 40px, next to a 61px-tall accent button right beside
+  it. Added `px-2 py-3` (`rounded-lg` for a visible hover/focus area) to
+  all three links — footer links now measure 40px tall, the header link
+  64px — with zero visual change to the page otherwise (still plain text,
+  same hover-underline-adjacent styling) and no new horizontal overflow at
+  375px (confirmed by re-measuring after the change).
+- **Fixed: CSAT rating email links were undersized on mobile mail clients**
+  (`src/lib/mail.ts`'s `emailShell()`, used by `notifyResolved()` in
+  `src/lib/notifications.ts`). `emailShell()`'s `<html>` had no
+  `<meta name="viewport">` — confirmed live by rendering the actual email
+  markup in a 375px viewport: without it, the browser (and, per how iOS/
+  macOS Mail handles HTML email that doesn't declare a viewport, some real
+  mobile mail clients too) laid the whole email out at a virtual ~980px
+  desktop width and scaled the entire thing down to fit the screen,
+  shrinking every tap target along with it — including the 5 one-click star
+  rating links `notifyResolved()` puts in the "resolved" email. Added the
+  viewport meta tag to `emailShell()` (shared by every transactional email
+  this app sends, not just the CSAT one) and increased the star links'
+  padding from `6px 10px` to `12px 14px` so each is closer to a real ~44px
+  target even before any client-side scaling is involved.
+- **Checked and found fine, no change needed**: long Arabic label wrapping
+  (e.g. the attachments field's two-line label, and a synthetic
+  long-submitter-name test injected into `MessageThread.tsx`'s message
+  header row) wraps within its own box without ever pushing the page into
+  horizontal scroll — the message header's `flex items-center
+  justify-between` row relies on the browser's default flex-shrink/wrap
+  behavior for its text children, which was verified to hold even for a
+  much longer name than any real seed data has; RTL layout (badge rows,
+  form grids, the message thread) showed no direction-related overflow or
+  misalignment at 375px; the native file-attachment `<input type="file">`
+  renders inside a full-width, ~49px-tall control on both the new-ticket
+  form and the reply form, which is an OS-native control this app doesn't
+  further style.
+- **What this pass explicitly did not touch**: `/dashboard/*` — used by the
+  internal support team on desktop, per the stated scope, not part of this
+  round.
 
 ## CSAT, bulk actions, CSV export, "my tickets" filter (v4)
 
