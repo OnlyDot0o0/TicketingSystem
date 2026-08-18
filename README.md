@@ -858,6 +858,75 @@ abstraction itself, but found while working in this exact file and too
 important (a load-bearing access-control file with zero git history) to
 leave for later.
 
+## Redis-backed rate limiting, with in-memory fallback (v9)
+
+`src/lib/rateLimit.ts` was in-memory-only, documented as a single-instance
+limitation (see "Security hardening" above and the old "Path to real
+production deploy" step 5) — a real multi-instance deploy behind a load
+balancer needs limits shared across instances, since separate processes
+each holding their own `Map` don't coordinate at all.
+
+- **Two backends, selected by whether `REDIS_URL` is set** — same
+  graceful-default pattern as every other optional integration in this app:
+  - **Unset (default)**: exactly today's in-memory sliding-log `Map`,
+    completely unchanged in logic from before this round.
+  - **Set**: a Redis-backed **fixed-window** counter via `ioredis`
+    (`INCR` + `EXPIRE`, only setting the expiry on the window's first
+    increment) — the standard shared-counter rate-limit pattern, and
+    exactly what was asked for. This is a genuinely different algorithm
+    from the in-memory sliding log (fixed windows can allow a short burst
+    right at a window boundary that a sliding log wouldn't) — an accepted,
+    well-understood trade-off for correctness/simplicity across multiple
+    instances, not an oversight.
+- **`checkRateLimit()`'s call signature is unchanged** — same 3 arguments,
+  same meaning. It did have to become `async` (`Promise<boolean>` instead
+  of `boolean`), since a Redis round-trip is inherently a network call; all
+  3 existing call sites (`src/app/login/actions.ts` ×2,
+  `src/app/[slug]/tickets/new/actions.ts` ×2) already live inside `async`
+  server actions, so this was a mechanical `await` added at each call site,
+  not a logic change anywhere.
+- **Fails OPEN, not closed, on a Redis error** (connection refused,
+  timeout, etc.) — deliberately different from `src/lib/captcha.ts`, which
+  fails closed on a verification error when CAPTCHA is configured.
+  CAPTCHA guards one specific form; this rate limiter sits in front of
+  login, TOTP, AND public ticket submission, so failing closed on a Redis
+  outage would lock every user in the app out of everything at once — worse
+  than temporarily running without this one layer of abuse protection. The
+  ioredis client is also configured with `maxRetriesPerRequest: 1` so a
+  stuck connection fails a given check quickly rather than hanging the
+  request that's waiting on it.
+- **Env var**: `REDIS_URL` (e.g. `redis://user:pass@host:6379`). Unset by
+  default — no code change needed to keep running exactly as before.
+
+**Verified vs. reasoned about:**
+
+- **Verified live**: the in-memory fallback (the active, default,
+  real-world-used path today) — both directly (7 rapid calls against a
+  5/hour limit produced exactly 5 allowed + 2 denied, matching the exact
+  counting behavior verified in earlier rounds) and through the real dev
+  server with no `REDIS_URL` set: logged in as `agent@raqaba.local`
+  (exercising the login-attempt limiter) and submitted a real public ticket
+  on `/raqaba/tickets/new` (exercising the phone/IP limiters) — both
+  succeeded normally, confirming the now-`async` `checkRateLimit()` didn't
+  break either caller. Also verified the Redis code path's **error
+  handling** specifically (this doesn't need a real Redis to test): pointed
+  `REDIS_URL` at an unreachable address and confirmed `checkRateLimit()`
+  fails open (returns `true`, allowing the request) in ~200ms rather than
+  hanging or throwing — proving the fail-open behavior actually works, not
+  just that it was written.
+- **NOT live-tested (no Docker/real Redis instance available in this
+  environment)**: the actual `INCR`/`EXPIRE` counting logic against a real
+  Redis server. What WAS done instead: `npx tsc --noEmit` passes against
+  the real `ioredis` types, and the command usage (`INCR` then
+  conditionally `EXPIRE` only when the counter was just created, i.e.
+  `count === 1`) was reviewed by hand against the standard fixed-window
+  rate-limit pattern this exact code implements.
+- **A real deployment activating `REDIS_URL` should first exercise it
+  directly** (e.g. trigger the login limiter a few times and confirm it
+  blocks/unblocks on schedule against the real Redis) before relying on it
+  in production — same "verify before you trust it" caveat as the S3
+  storage driver and the Postgres migration path.
+
 ## CSAT, bulk actions, CSV export, "my tickets" filter (v4)
 
 Four independent additions to the ticket queue and ticket lifecycle:
@@ -968,11 +1037,12 @@ Four independent additions to the ticket queue and ticket lifecycle:
 - **Rate limiting** on public ticket creation
   (`src/lib/rateLimit.ts`): **max 5 submissions per phone number per hour**
   and **max 10 per IP per hour** (IP read from `x-forwarded-for`/`x-real-ip`
-  via `next/headers`). Implemented as a simple in-memory, fixed-window
-  counter — correct and sufficient for this single-instance deployment. **A
-  real production/multi-instance deploy behind a load balancer should swap
-  this for a shared store (e.g. Redis `INCR`+`EXPIRE`)**, since an
-  in-process `Map` doesn't coordinate across instances.
+  via `next/headers`). Defaults to a simple in-memory sliding-log counter —
+  correct and sufficient for a single-instance deployment. (v9) **Set
+  `REDIS_URL` to switch to a Redis-backed shared `INCR`+`EXPIRE`
+  fixed-window counter** for a real multi-instance deploy behind a load
+  balancer, since an in-process `Map` doesn't coordinate across instances —
+  see "Redis-backed rate limiting" below for the full detail.
 - **Optional CAPTCHA** (`src/lib/captcha.ts`) — hCaptcha or reCAPTCHA v2,
   controlled entirely by env vars, same graceful-degradation pattern as
   SMTP: if unconfigured, the widget is never rendered and server-side
@@ -1231,9 +1301,10 @@ local dev) and fill in real values for production:
    R2, or MinIO) instead. See "Object storage abstraction" above for what's
    verified vs. reasoned-about for that driver.
 4. **Email**: set real `SMTP_HOST`/`SMTP_USER`/`SMTP_PASS`/`SMTP_FROM`.
-5. **Rate limiting**: swap the in-memory limiter in `src/lib/rateLimit.ts`
-   for a shared store (Redis `INCR`+`EXPIRE` or similar) once running more
-   than one instance.
+5. **Rate limiting**: (v9) set `REDIS_URL` to switch `src/lib/rateLimit.ts`
+   from its in-memory limiter to a Redis-backed `INCR`+`EXPIRE` fixed-window
+   counter shared across instances — see "Redis-backed rate limiting"
+   above for what's verified vs. reasoned-about there.
 6. **CAPTCHA**: set real `HCAPTCHA_SITE_KEY`/`HCAPTCHA_SECRET_KEY` (or the
    reCAPTCHA equivalents) before wide public exposure.
 7. **Secrets**: generate a fresh `NEXTAUTH_SECRET`, set `NEXTAUTH_URL` /
@@ -1252,7 +1323,7 @@ prisma/seed.ts                  Seed script (3 users, 3 projects, tickets, membe
 src/lib/access.ts               Project-scoped access control (getViewerScope, canAccessProject, ...)
 src/lib/ticketQueue.ts          Shared ticket-queue where/orderBy builder (v4) — used by /dashboard AND /dashboard/export.csv;
                                  (v8) q filter also matches description + message bodies
-src/lib/rateLimit.ts            In-memory fixed-window rate limiter
+src/lib/rateLimit.ts            Rate limiter — in-memory sliding log (default) or (v9) Redis fixed-window if REDIS_URL is set
 src/lib/storage.ts              (v9) ObjectStorage abstraction (local disk default / S3-compatible) for attachments
 src/lib/slaWarningScheduler.ts  (v8) Periodic SLA-breach warning check — setInterval registered via src/instrumentation.ts
 src/lib/captcha.ts              Optional hCaptcha/reCAPTCHA v2 support
@@ -1360,8 +1431,10 @@ What's actually in place for this:
   relying on it in production.
 - No automated test suite (unit/e2e) — verified by building and manually
   exercising the flows in a real browser (see below).
-- Rate limiting is in-memory/per-process — see "Path to real production
-  deploy" above for the multi-instance caveat.
+- Rate limiting is in-memory/per-process by default. (v9) A Redis-backed
+  shared limiter now exists (`REDIS_URL`) for multi-instance deploys, but
+  its `INCR`/`EXPIRE` logic hasn't been exercised against a real Redis in
+  this environment — see "Redis-backed rate limiting" above.
 - CAPTCHA support (`src/lib/captcha.ts`) has been verified against both
   providers' real verification APIs using their officially-published
   public test credentials (designed by each provider specifically so

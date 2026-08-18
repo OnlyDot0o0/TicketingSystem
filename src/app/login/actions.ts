@@ -40,7 +40,7 @@ export async function loginAction(
   const callbackUrl = String(formData.get("callbackUrl") || "/dashboard");
 
   const rateLimitKey = `login:${email.trim().toLowerCase()}:${clientIp()}`;
-  if (!checkRateLimit(rateLimitKey, LOGIN_ATTEMPTS_PER_WINDOW, ONE_HOUR_MS)) {
+  if (!(await checkRateLimit(rateLimitKey, LOGIN_ATTEMPTS_PER_WINDOW, ONE_HOUR_MS))) {
     return { error: "تم تجاوز عدد محاولات الدخول المسموح. يرجى المحاولة لاحقًا." };
   }
 
@@ -48,7 +48,7 @@ export async function loginAction(
   // password-only submission that reveals "a code is needed" isn't a guess.
   if (totpCode) {
     const totpRateLimitKey = `totp:${email.trim().toLowerCase()}:${clientIp()}`;
-    if (!checkRateLimit(totpRateLimitKey, TOTP_ATTEMPTS_PER_WINDOW, ONE_HOUR_MS)) {
+    if (!(await checkRateLimit(totpRateLimitKey, TOTP_ATTEMPTS_PER_WINDOW, ONE_HOUR_MS))) {
       return { needsTotp: true, error: "تم تجاوز عدد محاولات إدخال رمز التحقق. يرجى المحاولة لاحقًا." };
     }
   }

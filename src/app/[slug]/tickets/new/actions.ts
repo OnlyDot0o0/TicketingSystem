@@ -62,10 +62,10 @@ export async function createTicketAction(
 
   // --- Rate limiting (in-memory, single-instance — see src/lib/rateLimit.ts).
   const ip = clientIp();
-  if (!checkRateLimit(`phone:${submitterPhone}`, TICKET_RATE_LIMIT_PER_PHONE, ONE_HOUR_MS)) {
+  if (!(await checkRateLimit(`phone:${submitterPhone}`, TICKET_RATE_LIMIT_PER_PHONE, ONE_HOUR_MS))) {
     return { error: "تم تجاوز الحد المسموح لعدد التذاكر من نفس رقم الجوال. يرجى المحاولة لاحقًا." };
   }
-  if (!checkRateLimit(`ip:${ip}`, TICKET_RATE_LIMIT_PER_IP, ONE_HOUR_MS)) {
+  if (!(await checkRateLimit(`ip:${ip}`, TICKET_RATE_LIMIT_PER_IP, ONE_HOUR_MS))) {
     return { error: "تم تجاوز الحد المسموح لعدد التذاكر من هذا الاتصال. يرجى المحاولة لاحقًا." };
   }
 
