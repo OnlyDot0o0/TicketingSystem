@@ -1,6 +1,7 @@
 import { notFound } from "next/navigation";
 import { prisma } from "@/lib/prisma";
 import { PublicHeader, PublicFooter } from "@/components/PublicShell";
+import { parseCsatRatingParam, resolveCsatRating } from "@/lib/csat";
 
 // Public, unauthenticated one-click CSAT rating landing page, linked from
 // the 5 star links in the "resolved" notification email
@@ -26,19 +27,18 @@ export default async function CsatPage({
   });
   if (!ticket) notFound();
 
-  const ratingParam = searchParams.rating ? parseInt(searchParams.rating, 10) : NaN;
-  const requestedRating = Number.isInteger(ratingParam) && ratingParam >= 1 && ratingParam <= 5 ? ratingParam : null;
+  const requestedRating = parseCsatRatingParam(searchParams.rating);
+  const { rating: currentRatingResolved, shouldRecord } = resolveCsatRating(ticket.satisfactionRating, requestedRating);
 
-  let currentRating = ticket.satisfactionRating;
-  let justRated = false;
+  let currentRating = currentRatingResolved;
+  const justRated = shouldRecord;
 
-  if (requestedRating !== null && currentRating === null) {
+  if (shouldRecord) {
     await prisma.ticket.update({
       where: { id: ticket.id },
       data: { satisfactionRating: requestedRating, satisfactionSubmittedAt: new Date() },
     });
     currentRating = requestedRating;
-    justRated = true;
   }
 
   return (

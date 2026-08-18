@@ -16,7 +16,11 @@ recently (v9) a **mobile UX pass** on the public ticket flows, a **pluggable
 object-storage abstraction** for attachments (local disk, unchanged by
 default, or S3-compatible), a **Redis-backed rate limiter** (with the
 existing in-memory limiter kept as the zero-config fallback), and **Sentry
-error-tracking hooks** that no-op until configured.
+error-tracking hooks** that no-op until configured. This round (v10) closes
+out the hardening pass with a real **automated test suite** (Vitest, see
+"Testing" below) covering the highest-risk access-control, SLA, and
+authorization logic — deliberately sequenced last so it targets the final,
+stable schema.
 
 ## Multi-project architecture
 
@@ -1401,6 +1405,161 @@ local dev) and fill in real values for production:
 | `REDIS_URL` | no | (v9) Set to switch `src/lib/rateLimit.ts` to the Redis-backed limiter. See "Redis-backed rate limiting" above. |
 | `SENTRY_DSN`, `NEXT_PUBLIC_SENTRY_DSN` | no | (v9) Server/edge and client DSNs respectively (usually the same value). See "Error tracking hooks" above. |
 | `SENTRY_ORG`, `SENTRY_PROJECT`, `SENTRY_AUTH_TOKEN` | no | (v9) Only needed for source-map upload at build time; without them the build just skips that step. |
+
+## Testing
+
+This is the last item in this project's long hardening pass — deliberately
+sequenced last so the automated suite targets the final, stable schema
+rather than one still being rewritten underneath it. No more schema changes
+are planned after this round.
+
+```bash
+npm test              # runs the whole suite once (vitest run)
+npm run test:watch    # interactive watch mode
+npm run test:coverage # same, with a v8 coverage report over src/lib + the
+                       # two server-action modules covered below
+```
+
+### What's covered, and why
+
+Coverage is deliberately concentrated on the highest-risk logic: code that
+has actually had a real bug found and fixed in it during this project's
+history, or that guards a security/correctness boundary where a silent
+regression would be serious and easy to miss in manual click-testing. In
+priority order:
+
+1. **`src/lib/access.ts`** — the project-scoped access-control boundary
+   (v2): `getViewerScope()`'s SUPER_ADMIN-global vs. ADMIN/AGENT/CUSTOM
+   membership-required resolution, `canAccessProject()`,
+   `requireScopedViewer()`'s 404-on-zero-memberships behavior, and
+   `scopedProjectWhere()`'s three distinct return shapes (`undefined` /
+   a specific project id / `{ in: [...] }`) including that requesting an
+   inaccessible project 404s rather than silently widening the query. This
+   is the single most important authorization boundary in the app.
+2. **`src/lib/sla.ts`** — `computeSlaDueAt()`'s business-day math (URGENT
+   wall-clock hours vs. HIGH/MEDIUM/LOW business days correctly skipping
+   Friday/Saturday), `isOverdue()`, and `needsSlaWarning()`'s
+   25%-of-window threshold, including that it scales to each priority's
+   *own* window rather than sharing one fixed absolute threshold.
+3. **`src/lib/attachmentAccess.ts`** — signed attachment URLs: a valid
+   token verifies, a tampered signature is rejected, an expired token is
+   rejected, and — the specific regression guard here — a token signed for
+   one attachment path does **not** verify against a different path (this
+   exact bug was hand-caught during manual testing earlier in the project).
+4. **`src/lib/customFields.ts`** — `validateCustomFieldValue()` across
+   every field type (TEXT/TEXTAREA/NUMBER/DATE/SELECT/CHECKBOX),
+   required/optional/blank combinations, invalid `SELECT` values, and the
+   documented "CHECKBOX never blocks required" behavior.
+5. **`src/lib/ticketNumber.ts`** — `generateTicketNumber()`'s prefix +
+   zero-padded-sequence format, and — the part a naive single-call test
+   would miss — that firing many concurrent calls for the *same* project
+   never collides and lands the counter exactly on the expected final
+   value (proving the atomic `{ increment: 1 }` update, not a
+   read-then-write race).
+6. **Bulk-action authorization** (`src/app/dashboard/bulk-actions.ts`) —
+   an AGENT scoped to one project, asked to bulk-update/assign/tag a
+   mixed list of ticket ids spanning an accessible and an inaccessible
+   project, only ever acts on the accessible ones (tested against a real
+   test-DB scope, not a mocked one).
+7. **`canManageUser`** (private, in
+   `src/app/dashboard/agents/actions.ts`, exercised through
+   `toggleAgentActiveAction`/`updateAgentRoleAction`) — a project-scoped
+   ADMIN may only manage a user whose *entire* membership set is a subset
+   of the actor's own, not just "shares at least one project". This exact
+   bug was found and fixed earlier in the project's history; the test for
+   it is written to fail if that fix is ever reverted.
+8. **`src/lib/rateLimit.ts`** — the in-memory fixed-window-ish path: allows
+   up to the limit, denies over it, and resets once the window elapses
+   (via `vi.useFakeTimers()`, never a real sleep).
+9. **`src/lib/storage.ts`** — `LocalDiskStorage`'s save/read/delete
+   round-trip against a real temp subfolder under `uploads/` (real disk
+   I/O, not mocked), and `assertSafeKey()` rejecting path traversal,
+   absolute paths, and backslashes.
+10. **CSAT rating idempotency** and the **`projectStaffEmails`**
+    notification-scoping helper in `src/lib/notifications.ts` (including a
+    regression guard for an earlier bug where a `role: { in: [...] }`
+    filter silently never matched the literal string `"CUSTOM"`, so a
+    custom-role agent never heard about tickets even in their own
+    project).
+
+### Test-DB setup
+
+Anything that touches the database runs against a **separate SQLite file**,
+`prisma/test.db` (gitignored, never `prisma/dev.db`):
+
+- `tests/testDbUrl.ts` computes one `DATABASE_URL` (an absolute-path
+  `file:` URL with `?connection_limit=1`, so Prisma serializes every query
+  through a single connection instead of risking "database is locked"
+  errors against a single sqlite file) — both `vitest.config.ts` (which
+  injects it as `test.env.DATABASE_URL`, visible to every test file) and
+  `tests/globalSetup.ts` compute it from this one shared helper so they can
+  never drift apart.
+- `tests/globalSetup.ts` runs **once** before the whole `vitest run`:
+  deletes any leftover `test.db`/`-journal`/`-wal`/`-shm` files from a
+  previous run, then runs `npx prisma migrate deploy` against it so every
+  run starts from a clean, fully-migrated schema.
+- Test **files** run sequentially (`fileParallelism: false` in
+  `vitest.config.ts`) — sqlite is a single-writer file, so running test
+  files concurrently in separate workers against the same `test.db`
+  invited both locking errors and cross-file state races.
+- `tests/helpers/db.ts` re-exports the app's own `@/lib/prisma` singleton
+  (so tests exercise the exact client code path production does) plus
+  `resetDb()` — wipes every app table, children-before-parents, in one
+  transaction — and small per-test fixture builders (`createProject`,
+  `createUser`, `addMembership`, `createTicket`) modeled on the
+  conventions in `prisma/seed.ts` (slugs, roles, etc.) but deliberately
+  **not** the full dev seed: each test file calls `resetDb()` in
+  `beforeEach` and builds only the minimal fixtures that specific test
+  actually needs, so failures are easy to reason about and one test's data
+  can never leak into another's.
+- Pure-logic modules with no DB dependency at all (`sla.ts`,
+  `attachmentAccess.ts`, `customFields.ts`, `rateLimit.ts`, `storage.ts`)
+  are tested as fast, isolated unit tests under `tests/unit/` with zero DB
+  setup. DB-touching tests live under `tests/integration/`.
+- `next/navigation`'s `notFound()`/`redirect()` are exercised for real
+  (not mocked) in `tests/integration/access.test.ts` — both just throw a
+  plain `Error` carrying a `.digest` string and don't depend on a live
+  Next.js request context (confirmed by reading
+  `node_modules/next/dist/client/components/{not-found,redirect}.js`), so
+  tests assert on that digest directly. Only the session-resolution
+  boundary (`auth()` from `@/lib/auth`, i.e. next-auth) is mocked, since
+  that's genuinely outside the module under test.
+
+### What's deliberately NOT covered here
+
+This is a unit/integration-level suite, not end-to-end browser
+automation — full click-through flows (2FA enrollment, CSV export
+download, the actual multipart file-upload UI, real email delivery) are
+still verified manually against a real dev server, the same way every
+prior round in this README's "Verification performed" sections was. Also
+out of scope for this round: the S3 storage driver (never exercised
+against a real S3/R2/MinIO endpoint — see "Object storage abstraction"
+above for the same honest gap already documented there), the Redis-backed
+rate limiter's actual Redis path (only the in-memory fallback is tested;
+Redis's own `INCR`/`EXPIRE` behavior is well-established library code, not
+this app's own logic), and the SLA-warning background scheduler's
+`setInterval` wiring in `src/lib/slaWarningScheduler.ts` (its actual
+25%-of-window decision logic, `needsSlaWarning()`, is fully covered above —
+what's untested is just the periodic-polling plumbing around it).
+
+### A small refactor made along the way
+
+`src/app/csat/[ticketId]/page.tsx`'s rating-idempotency decision (a ticket
+that already has a `satisfactionRating` must never be silently overwritten
+by a later, possibly-different star-rating click) was extracted out of the
+page component into two small pure functions,
+`resolveCsatRating()`/`parseCsatRatingParam()` in the new
+**`src/lib/csat.ts`** — same shape as this codebase's other small,
+focused `src/lib/*.ts` modules (`sla.ts`, `customFields.ts`). This was a
+judgment call made purely for testability: importing a `.tsx` page
+component directly into Vitest hit a JSX-transform mismatch (this
+project's `tsconfig.json` sets `compilerOptions.jsx: "preserve"` for
+Next.js's own SWC pipeline, which Vite's bundler-based test transform
+doesn't handle the same way) that would have needed a real React-rendering
+toolchain (e.g. `@vitejs/plugin-react`) to work around for the sake of one
+test file. The extraction is behavior-preserving — the page calls the
+exact same two functions it inlined before — and makes the actual
+decision logic directly unit-testable without that dependency.
 
 ## Path to real production deploy
 
