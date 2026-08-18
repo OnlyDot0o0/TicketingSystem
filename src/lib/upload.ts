@@ -1,12 +1,13 @@
-import { mkdir, writeFile } from "fs/promises";
 import path from "path";
 import crypto from "crypto";
 import { ALLOWED_MIME_TYPES, MAX_UPLOAD_SIZE_BYTES } from "./config";
+import { getStorage } from "./storage";
 
-// Uploaded files are stored under <project-root>/uploads, which is OUTSIDE
-// of /public, so nothing is served statically. Files must go through the
-// /api/uploads/[...path] route, giving us a seam to add access control later.
-export const UPLOAD_ROOT = path.join(process.cwd(), "uploads");
+// Actual reads/writes go through src/lib/storage.ts's ObjectStorage
+// abstraction below, not straight to the filesystem — see that file for the
+// local-disk (default) vs. S3-compatible drivers, selected via
+// STORAGE_DRIVER. src/app/api/uploads/[...path]/route.ts (the read side)
+// goes through the same abstraction, via the same getStorage().
 
 export class UploadValidationError extends Error {}
 
@@ -27,19 +28,19 @@ export async function saveUploadedFile(ticketId: string, file: File): Promise<{
 }> {
   assertValidUpload(file);
 
-  const ticketDir = path.join(UPLOAD_ROOT, ticketId);
-  await mkdir(ticketDir, { recursive: true });
-
   const ext = path.extname(file.name) || "";
   const safeName = `${crypto.randomUUID()}${ext}`;
-  const fullPath = path.join(ticketDir, safeName);
+  // Forward slashes always — this is a storage key (local disk today,
+  // possibly S3 tomorrow), not a raw OS path, so it must stay
+  // platform-independent even when this runs on Windows.
+  const storedPath = `${ticketId}/${safeName}`;
 
   const buffer = Buffer.from(await file.arrayBuffer());
-  await writeFile(fullPath, buffer);
+  await getStorage().save(storedPath, buffer, file.type);
 
   return {
     filename: file.name,
-    storedPath: path.join(ticketId, safeName),
+    storedPath,
     mimeType: file.type,
     size: file.size,
   };

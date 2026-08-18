@@ -743,6 +743,121 @@ mobile QA pass would do, just automated instead of eyeballed.
   internal support team on desktop, per the stated scope, not part of this
   round.
 
+## Object storage abstraction for attachments (v9)
+
+`src/lib/upload.ts` used to write straight to local disk, and — more
+importantly — `src/app/api/uploads/[...path]/route.ts` (the *read* side)
+used to read straight off local disk too. `uploads/` local disk doesn't
+persist across most serverless deploys (this was already flagged in "Path
+to real production deploy"), so this adds a real storage abstraction
+instead of just noting it as a known gap.
+
+- **`src/lib/storage.ts`** — a small, focused `ObjectStorage` interface
+  (`save` / `read` / `delete`), same style as this app's other small,
+  single-purpose lib modules (`src/lib/rateLimit.ts`,
+  `src/lib/attachmentAccess.ts`): two implementations, one exported
+  `getStorage()` singleton picking between them.
+  - **`LocalDiskStorage`** — the default, and unchanged in behavior from
+    before this round: writes under `UPLOAD_ROOT` (`<project-root>/uploads`),
+    same directory layout (`<ticketId>/<uuid>.ext`) as always.
+  - **`S3Storage`** — works against real AWS S3, Cloudflare R2, or MinIO,
+    since they all speak the same S3 REST API, using the standard
+    `@aws-sdk/client-s3` package (added as a dependency). Keyed by the exact
+    same `<ticketId>/<uuid>.ext` string this app already uses as
+    `Attachment.path` — callers never need to know which driver is active.
+    The SDK import itself is lazy (`await import("@aws-sdk/client-s3")`
+    inside the driver's methods) so the zero-config local-disk path never
+    even loads the S3 SDK.
+  - **Selected via `STORAGE_DRIVER=local|s3`, defaulting to `local` if
+    unset** — same graceful-default pattern as every other optional
+    integration in this app (SMTP, CAPTCHA). Nothing about the default
+    behavior changes unless you explicitly opt in.
+  - **`assertSafeKey()`** replaces the old local-disk-only
+    normalize-and-`startsWith`-the-root path-traversal check that used to
+    live directly in the uploads route — that trick only made sense when
+    "the storage" was always a real filesystem path. The new check rejects
+    absolute paths, backslashes, and `.`/`..` segments directly on the key
+    string, which works the same way regardless of which driver is active.
+- **`src/lib/upload.ts`**: `saveUploadedFile()` keeps the exact same
+  signature and return shape (`{ filename, storedPath, mimeType, size }`) —
+  none of its 3 call sites (`[slug]/tickets/new/actions.ts`,
+  `[slug]/tickets/track/actions.ts`, `dashboard/tickets/[id]/actions.ts`)
+  needed to change. Internally it now builds the buffer and calls
+  `getStorage().save()` instead of `mkdir`+`writeFile` directly.
+- **`src/app/api/uploads/[...path]/route.ts`**: now calls
+  `getStorage().read()` instead of `fs/promises`' `readFile`/`stat`
+  directly — this was the file most likely to be missed ("write goes to S3,
+  but the read side still only knows how to read local disk" would have
+  made the S3 driver silently unservable), so it was deliberately updated
+  in the same pass as `upload.ts`, not left for later. All of this route's
+  existing access control (signed-token check for the public
+  ticket-tracking flow, session+`canAccessProject()` check for staff) is
+  unchanged — only the byte-fetching step under it moved behind
+  `ObjectStorage`.
+- **Env vars for the S3 driver** (only read when `STORAGE_DRIVER=s3`):
+  `S3_BUCKET`, `S3_REGION`, `S3_ACCESS_KEY_ID`, `S3_SECRET_ACCESS_KEY`
+  (all required), plus `S3_ENDPOINT` (optional — omit for real AWS S3, set
+  for R2/MinIO/any other S3-compatible endpoint) and
+  `S3_FORCE_PATH_STYLE` (optional `"true"`/`"1"` — needed by MinIO and some
+  self-hosted setups; AWS and R2 don't need it).
+
+**Verified vs. reasoned about (be honest about the difference here, same as
+this README already is for CAPTCHA and the Postgres migration path):**
+
+- **Verified live, end-to-end, against this app's real dev server**: the
+  local-disk driver — the active, default, real-world-used path today, and
+  a regression here would matter far more than an unverified S3 path. Since
+  the browser tooling available in this environment can't drive a native
+  OS file picker, the write side was exercised by calling the real,
+  unmodified `saveUploadedFile()` (imported directly, not reimplemented)
+  against a real ticket (`RQ-000001`) with a real PNG buffer — this goes
+  through the exact same `getStorage().save()` call a real multipart form
+  submission would. Confirmed the file landed on disk at the expected
+  `<ticketId>/<uuid>.png` path. Then loaded `/raqaba/tickets/track` for that
+  ticket in a real browser, got the page's real signed attachment URL, and
+  fetched it — got `200`, `Content-Type: image/png`, the correct
+  `Content-Disposition` filename, the correct byte length, and the PNG
+  magic-number bytes (`89 50 4E 47 0D 0A 1A 0A`) at the start of the
+  response, confirming the exact bytes round-tripped correctly through
+  `getStorage().save()` → disk → the updated route → `getStorage().read()`.
+  Also called `getStorage().delete()` directly and confirmed the file and
+  its `Attachment` row were both gone afterward. All test data removed
+  afterward.
+- **NOT live-tested (no Docker, no real S3/R2/MinIO credentials available
+  in this environment)**: the `S3Storage` driver was never executed against
+  a real endpoint. What WAS done instead: `npx tsc --noEmit` passes with the
+  driver's actual code (not stubbed out), so the `@aws-sdk/client-s3`
+  request construction (`PutObjectCommand`/`GetObjectCommand`/
+  `DeleteObjectCommand` shape, `Bucket`/`Key`/`Body`/`ContentType` fields)
+  type-checks against the real SDK's types, and the request-construction
+  logic was reviewed carefully by hand against the S3 API contract —
+  bucket/key addressing, the lazy-client-init pattern, and the
+  `GetObjectCommand` response body being collected via async iteration
+  (chosen over the SDK's optional `transformToByteArray()` stream-mixin
+  helper specifically so it doesn't depend on that helper being present
+  across SDK minor versions). This is code-complete and reasoned-through,
+  not verified against a real bucket — the honest gap here, same as this
+  README already flags for the Postgres migration path not having a live
+  Postgres server to test against.
+- **A real deployment activating the S3 driver should first exercise it
+  against the real target (S3/R2/MinIO) directly** — e.g. upload one test
+  ticket attachment and confirm it's fetchable — before relying on it in
+  production, exactly the same "verify before you trust it" step this
+  README already recommends for the Postgres migration.
+
+**Deviation / judgment call**: while touching `src/app/api/uploads/[...path]/route.ts`
+for this round, its content was found to be **silently untracked by git
+entirely** — the repo's `.gitignore` had a bare `uploads/` entry, which
+(with no leading slash) matches a directory named `uploads` at *any* depth,
+not just the top-level `uploads/` runtime storage folder it was meant for.
+That accidentally also matched `src/app/api/uploads/`, so this real source
+file (containing this app's attachment access-control logic) had never
+once been committed. Fixed by anchoring the pattern (`/uploads/`) and adding
+the file to tracking in this same commit — unrelated to the storage
+abstraction itself, but found while working in this exact file and too
+important (a load-bearing access-control file with zero git history) to
+leave for later.
+
 ## CSAT, bulk actions, CSV export, "my tickets" filter (v4)
 
 Four independent additions to the ticket queue and ticket lifecycle:
@@ -1067,6 +1182,9 @@ local dev) and fill in real values for production:
 | `SMTP_HOST`, `SMTP_PORT`, `SMTP_USER`, `SMTP_PASS`, `SMTP_FROM` | no | If any of `SMTP_HOST`/`SMTP_USER`/`SMTP_PASS` are missing, email sending **no-ops and logs to the console** (including the password-reset link) instead of crashing. |
 | `HCAPTCHA_SITE_KEY`, `HCAPTCHA_SECRET_KEY` | no | Enables hCaptcha on the public ticket form. Both must be set. |
 | `RECAPTCHA_SITE_KEY`, `RECAPTCHA_SECRET_KEY` | no | Enables reCAPTCHA v2 instead, if hCaptcha vars aren't set. |
+| `STORAGE_DRIVER` | no | (v9) `local` (default) or `s3`. See "Object storage abstraction" above. |
+| `S3_BUCKET`, `S3_REGION`, `S3_ACCESS_KEY_ID`, `S3_SECRET_ACCESS_KEY` | only if `STORAGE_DRIVER=s3` | Required together when the S3 driver is selected. |
+| `S3_ENDPOINT`, `S3_FORCE_PATH_STYLE` | no | Optional even with `STORAGE_DRIVER=s3` — set `S3_ENDPOINT` for R2/MinIO (omit for real AWS S3), `S3_FORCE_PATH_STYLE=true` if your provider needs path-style addressing. |
 
 ## Path to real production deploy
 
@@ -1105,9 +1223,13 @@ local dev) and fill in real values for production:
       against real production data, spot-check with something like
       `SELECT DISTINCT role FROM "User"` per converted column first.
    4. Run `npx prisma generate` and redeploy.
-3. **File storage**: `uploads/` is local disk, which doesn't persist across
-   most serverless deploys. For production, swap `src/lib/upload.ts` to
-   write to S3/R2/Blob storage instead of the local filesystem.
+3. **File storage**: `uploads/` local disk is still the zero-config default
+   and doesn't persist across most serverless deploys — but as of (v9) this
+   is now a one-env-var switch rather than a code change: set
+   `STORAGE_DRIVER=s3` plus the `S3_*` vars below to route attachments
+   through `src/lib/storage.ts`'s S3-compatible driver (AWS S3, Cloudflare
+   R2, or MinIO) instead. See "Object storage abstraction" above for what's
+   verified vs. reasoned-about for that driver.
 4. **Email**: set real `SMTP_HOST`/`SMTP_USER`/`SMTP_PASS`/`SMTP_FROM`.
 5. **Rate limiting**: swap the in-memory limiter in `src/lib/rateLimit.ts`
    for a shared store (Redis `INCR`+`EXPIRE` or similar) once running more
@@ -1131,6 +1253,7 @@ src/lib/access.ts               Project-scoped access control (getViewerScope, c
 src/lib/ticketQueue.ts          Shared ticket-queue where/orderBy builder (v4) — used by /dashboard AND /dashboard/export.csv;
                                  (v8) q filter also matches description + message bodies
 src/lib/rateLimit.ts            In-memory fixed-window rate limiter
+src/lib/storage.ts              (v9) ObjectStorage abstraction (local disk default / S3-compatible) for attachments
 src/lib/slaWarningScheduler.ts  (v8) Periodic SLA-breach warning check — setInterval registered via src/instrumentation.ts
 src/lib/captcha.ts              Optional hCaptcha/reCAPTCHA v2 support
 src/lib/passwordReset.ts        Hashed, single-use, time-limited reset tokens
@@ -1157,8 +1280,8 @@ src/app/dashboard/projects/     SUPER_ADMIN: create/edit any project; ADMIN: own
 src/app/dashboard/projects/[id] ticket-form config + team membership
 src/app/dashboard/canned-responses/  manage reusable reply templates
 src/app/dashboard/tickets/[id]/ ticket detail: reply, controls, tags, activity log, CSAT rating (v4)
-src/app/api/uploads/[...path]   serves uploaded files from outside /public
-uploads/                        uploaded files live here (gitignored)
+src/app/api/uploads/[...path]   serves uploaded files from outside /public; (v9) reads via src/lib/storage.ts
+uploads/                        uploaded files live here by default (gitignored) — see src/lib/storage.ts for the S3-compatible alternative
 ```
 
 ## Scaling: one shared database, not one-per-project
@@ -1228,9 +1351,13 @@ What's actually in place for this:
   ranking, no stemming. See "Broadened ticket search" above for the
   Postgres `tsvector`/`tsquery` upgrade path once the Postgres migration is
   actually applied.
-- File uploads are stored on local disk (`uploads/`) — fine for a single
-  server / local dev, but needs to move to object storage (S3/R2) for a
-  serverless or multi-instance production deploy.
+- File uploads default to local disk (`uploads/`) — fine for a single
+  server / local dev. (v9) A real S3-compatible driver now exists
+  (`src/lib/storage.ts`, `STORAGE_DRIVER=s3`) for a serverless or
+  multi-instance production deploy, but it hasn't been exercised against a
+  real S3/R2/MinIO endpoint in this environment — see "Object storage
+  abstraction" above for the verified-vs-reasoned-about breakdown before
+  relying on it in production.
 - No automated test suite (unit/e2e) — verified by building and manually
   exercising the flows in a real browser (see below).
 - Rate limiting is in-memory/per-process — see "Path to real production
