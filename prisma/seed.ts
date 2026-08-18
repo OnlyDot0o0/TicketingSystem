@@ -5,6 +5,31 @@ const prisma = new PrismaClient();
 
 const RAQABA_FAQ_URL = "https://claude.ai/code/artifact/6493aab5-1e9b-42a7-8651-ca98411419be";
 
+// The same default 6-category set every project used to share globally
+// before categories became per-project (v6) — see src/lib/categories.ts
+// (DEFAULT_CATEGORIES), which this mirrors so a fresh `migrate reset` +
+// seed reproduces the exact same category keys the existing sample tickets
+// below already reference (LOGIN_CONNECTIVITY, etc.), same as the one-time
+// migration backfill does for a pre-existing dev.db.
+const DEFAULT_CATEGORIES = [
+  { key: "LOGIN_CONNECTIVITY", label: "الدخول والاتصال" },
+  { key: "ROUTES_PATROLS", label: "المسارات والدوريات" },
+  { key: "RECORDS_DATES", label: "السجلات والتواريخ" },
+  { key: "PHOTOS_ATTACHMENTS", label: "الصور والمرفقات" },
+  { key: "PERFORMANCE", label: "الأداء" },
+  { key: "OTHER", label: "أخرى" },
+];
+
+async function seedDefaultCategories(projectId: string) {
+  for (const [i, c] of DEFAULT_CATEGORIES.entries()) {
+    await prisma.category.upsert({
+      where: { projectId_key: { projectId, key: c.key } },
+      update: {},
+      create: { projectId, key: c.key, label: c.label, order: i },
+    });
+  }
+}
+
 function addBusinessDays(start: Date, days: number): Date {
   const result = new Date(start.getTime());
   let remaining = days;
@@ -249,6 +274,12 @@ async function main() {
     update: {},
     create: { userId: seniorAgent.id, projectId: demo.id },
   });
+
+  // Default categories for all three seeded projects (v6) — see
+  // seedDefaultCategories above.
+  await seedDefaultCategories(raqaba.id);
+  await seedDefaultCategories(demo.id);
+  await seedDefaultCategories(acme.id);
 
   // v3 demonstration custom fields — one per project, so the public form
   // scoping (each project only shows its own fields) is verifiable

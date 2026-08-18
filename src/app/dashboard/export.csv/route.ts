@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
 import { requireScopedViewer } from "@/lib/access";
 import { buildTicketQueueWhere, buildTicketQueueOrderBy, TicketQueueFilters } from "@/lib/ticketQueue";
-import { CATEGORY_LABELS, PRIORITY_LABELS, STATUS_LABELS } from "@/lib/config";
+import { PRIORITY_LABELS, STATUS_LABELS } from "@/lib/config";
 import { Prisma } from "@prisma/client";
 
 // CSV export of the ticket queue's CURRENTLY FILTERED result set — the
@@ -36,12 +36,12 @@ const HEADER = [
 
 type ExportTicket = Prisma.TicketGetPayload<{ include: { project: true; assignedTo: true } }>;
 
-function rowFor(t: ExportTicket): string[] {
+function rowFor(t: ExportTicket, categoryLabelMap: Map<string, string>): string[] {
   return [
     t.ticketNumber,
     t.project.name,
     t.subject,
-    CATEGORY_LABELS[t.category] ?? t.category,
+    categoryLabelMap.get(`${t.projectId}:${t.category}`) ?? t.category,
     PRIORITY_LABELS[t.priority] ?? t.priority,
     STATUS_LABELS[t.status] ?? t.status,
     t.assignedTo?.name ?? "غير مسندة",
@@ -81,6 +81,16 @@ export async function GET(req: NextRequest) {
 
   const where = buildTicketQueueWhere(scope, filters);
   const primaryOrderBy = buildTicketQueueOrderBy(filters.sort);
+
+  // Categories are per-project now (v6) — preload every category this
+  // export could possibly need a label for (every project accessible to
+  // this viewer, same scoping the queue page itself uses) into a single
+  // map, rather than a query per row.
+  const categoryRows = await prisma.category.findMany({
+    where: scope.isSuperAdmin ? undefined : { projectId: { in: scope.projectIds || [] } },
+    select: { projectId: true, key: true, label: true },
+  });
+  const categoryLabelMap = new Map(categoryRows.map((c) => [`${c.projectId}:${c.key}`, c.label]));
   // A batched skip/take walk needs a STRICT total order to guarantee no
   // row is skipped or repeated across batch boundaries — createdAt/slaDueAt
   // alone can tie (two tickets created in the same second, say), which the
@@ -115,7 +125,7 @@ export async function GET(req: NextRequest) {
           });
           if (batch.length === 0) break;
 
-          const chunk = batch.map((t) => csvLine(rowFor(t))).join("\r\n") + "\r\n";
+          const chunk = batch.map((t) => csvLine(rowFor(t, categoryLabelMap))).join("\r\n") + "\r\n";
           controller.enqueue(encoder.encode(chunk));
 
           if (batch.length < BATCH_SIZE) break;

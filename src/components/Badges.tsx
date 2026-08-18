@@ -1,4 +1,4 @@
-import { CATEGORY_LABELS, PRIORITY_LABELS, STATUS_LABELS } from "@/lib/config";
+import { PRIORITY_LABELS, STATUS_LABELS } from "@/lib/config";
 
 function toneStyle(tone: "neutral" | "amber" | "red" | "teal" | "green") {
   switch (tone) {
@@ -40,10 +40,16 @@ export function PriorityBadge({ priority }: { priority: string }) {
   );
 }
 
-export function CategoryBadge({ category }: { category: string }) {
+// Categories are per-project now (v6) — there's no global key→label map to
+// fall back on here, so callers that have already resolved this ticket's
+// project's Category list should pass `label` explicitly. Falls back to the
+// raw stored key when no label is available (e.g. a caller that hasn't
+// fetched the project's categories), same graceful-degradation spirit as
+// the old `CATEGORY_LABELS[category] ?? category` lookup.
+export function CategoryBadge({ category, label }: { category: string; label?: string }) {
   return (
     <span className="badge" style={toneStyle("neutral")}>
-      {CATEGORY_LABELS[category] ?? category}
+      {label ?? category}
     </span>
   );
 }

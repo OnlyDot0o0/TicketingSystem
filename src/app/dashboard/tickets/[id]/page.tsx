@@ -4,6 +4,7 @@ import { getViewerScope, canAccessProject } from "@/lib/access";
 import { StatusBadge, PriorityBadge, CategoryBadge, OverdueBadge } from "@/components/Badges";
 import { MessageThread, AttachmentChip } from "@/components/MessageThread";
 import { isOverdue } from "@/lib/sla";
+import { categoryLabel } from "@/lib/categories";
 import TicketControls from "./TicketControls";
 import AgentReplyForm from "./AgentReplyForm";
 import TagsSection from "./TagsSection";
@@ -29,7 +30,7 @@ export default async function TicketDetailPage({ params }: { params: { id: strin
   if (!ticket) notFound();
   if (!canAccessProject(scope, ticket.projectId)) notFound();
 
-  const [agents, projectTags, cannedResponses, customFields] = await Promise.all([
+  const [agents, projectTags, cannedResponses, customFields, categories] = await Promise.all([
     scope.isSuperAdmin
       ? prisma.user.findMany({ where: { active: true }, orderBy: { name: "asc" } })
       : prisma.user.findMany({
@@ -39,6 +40,7 @@ export default async function TicketDetailPage({ params }: { params: { id: strin
     prisma.tag.findMany({ where: { projectId: ticket.projectId }, orderBy: { name: "asc" } }),
     prisma.cannedResponse.findMany({ where: { projectId: ticket.projectId }, orderBy: { title: "asc" } }),
     prisma.customField.findMany({ where: { projectId: ticket.projectId }, orderBy: { order: "asc" } }),
+    prisma.category.findMany({ where: { projectId: ticket.projectId }, orderBy: { order: "asc" } }),
   ]);
 
   const fieldValueByFieldId = new Map(
@@ -74,7 +76,7 @@ export default async function TicketDetailPage({ params }: { params: { id: strin
             <div className="flex flex-wrap gap-2">
               <StatusBadge status={ticket.status} />
               <PriorityBadge priority={ticket.priority} />
-              <CategoryBadge category={ticket.category} />
+              <CategoryBadge category={ticket.category} label={categoryLabel(categories, ticket.category)} />
               {overdue && <OverdueBadge />}
             </div>
           </div>
@@ -129,6 +131,7 @@ export default async function TicketDetailPage({ params }: { params: { id: strin
             status={ticket.status}
             priority={ticket.priority}
             category={ticket.category}
+            categories={categories.map((c) => ({ key: c.key, label: c.label }))}
             assignedToId={ticket.assignedToId}
             agents={agents}
             currentUserId={scope.userId}

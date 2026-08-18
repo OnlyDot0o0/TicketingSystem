@@ -9,15 +9,6 @@
 export const APP_BASE_URL =
   process.env.APP_BASE_URL || process.env.NEXTAUTH_URL || "http://localhost:3000";
 
-export const CATEGORY_LABELS: Record<string, string> = {
-  LOGIN_CONNECTIVITY: "الدخول والاتصال",
-  ROUTES_PATROLS: "المسارات والدوريات",
-  RECORDS_DATES: "السجلات والتواريخ",
-  PHOTOS_ATTACHMENTS: "الصور والمرفقات",
-  PERFORMANCE: "الأداء",
-  OTHER: "أخرى",
-};
-
 export const PRIORITY_LABELS: Record<string, string> = {
   LOW: "منخفضة",
   MEDIUM: "متوسطة",

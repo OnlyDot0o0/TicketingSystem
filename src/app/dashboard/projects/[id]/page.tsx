@@ -7,6 +7,8 @@ import TicketFormConfigForm from "./TicketFormConfigForm";
 import AddMemberForm from "./AddMemberForm";
 import RemoveMemberButton from "./RemoveMemberButton";
 import CustomFieldsManager from "./CustomFieldsManager";
+import CategoriesManager from "./CategoriesManager";
+import SlaConfigForm from "./SlaConfigForm";
 
 export default async function ProjectDetailPage({ params }: { params: { id: string } }) {
   const scope = await getViewerScope();
@@ -20,6 +22,7 @@ export default async function ProjectDetailPage({ params }: { params: { id: stri
       memberships: { include: { user: { include: { customRole: true } } }, orderBy: { createdAt: "asc" } },
       _count: { select: { tickets: true } },
       customFields: { orderBy: { order: "asc" } },
+      categories: { orderBy: { order: "asc" } },
     },
   });
   if (!project) notFound();
@@ -110,6 +113,34 @@ export default async function ProjectDetailPage({ params }: { params: { id: stri
             options: f.options,
             order: f.order,
           }))}
+        />
+      </div>
+
+      <div className="card p-5">
+        <h2 className="mb-1 text-sm font-bold">تصنيفات التذاكر</h2>
+        <p className="mb-3 text-xs text-ink-soft">
+          تصنيفات المشكلة الخاصة بهذا المشروع، تظهر في نموذج فتح تذكرة جديدة العام وفي صفحات إدارة
+          التذاكر. لا يمكن حذف تصنيف مستخدم في أي تذكرة حاليًا، ولا يمكن حذف آخر تصنيف متبقٍ في
+          المشروع.
+        </p>
+        <CategoriesManager
+          projectId={project.id}
+          categories={project.categories.map((c) => ({ id: c.id, key: c.key, label: c.label, order: c.order }))}
+        />
+      </div>
+
+      <div className="card p-5">
+        <h2 className="mb-1 text-sm font-bold">مهلة الاستجابة (SLA)</h2>
+        <p className="mb-3 text-xs text-ink-soft">
+          الوقت المستهدف للاستجابة لكل مستوى أولوية في هذا المشروع. الأولوية "عاجلة" بالساعات
+          (زمن حقيقي)، وباقي المستويات بأيام العمل (الجمعة والسبت عطلة).
+        </p>
+        <SlaConfigForm
+          projectId={project.id}
+          slaUrgentHours={project.slaUrgentHours}
+          slaHighDays={project.slaHighDays}
+          slaMediumDays={project.slaMediumDays}
+          slaLowDays={project.slaLowDays}
         />
       </div>
 

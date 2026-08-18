@@ -15,17 +15,8 @@ export type CreateTicketState = {
   error?: string;
 };
 
-const CATEGORIES = [
-  "LOGIN_CONNECTIVITY",
-  "ROUTES_PATROLS",
-  "RECORDS_DATES",
-  "PHOTOS_ATTACHMENTS",
-  "PERFORMANCE",
-  "OTHER",
-];
 const PRIORITIES: PriorityLevel[] = ["LOW", "MEDIUM", "HIGH", "URGENT"];
 
-const DEFAULT_CATEGORY = "OTHER";
 const DEFAULT_PRIORITY: PriorityLevel = "MEDIUM";
 
 function clientIp(): string {
@@ -98,13 +89,32 @@ export async function createTicketAction(
 
   // category/priority: REQUIRED or OPTIONAL only. If OPTIONAL and left
   // blank (or invalid), fall back to a sensible default server-side.
+  //
+  // Categories are per-project (v6) — never trust the client's submitted
+  // key against a global list. Re-fetch this project's actual categories
+  // and validate against those; a spoofed value (e.g. a category key
+  // belonging to a different project, injected via devtools) is rejected
+  // the same way a spoofed built-in field mode already is above.
+  const projectCategories = await prisma.category.findMany({
+    where: { projectId: project.id },
+    orderBy: { order: "asc" },
+  });
   if (project.categoryMode === "REQUIRED" && !categoryRaw) {
     return { error: "يرجى اختيار تصنيف المشكلة." };
   }
-  if (categoryRaw && !CATEGORIES.includes(categoryRaw)) {
+  if (categoryRaw && !projectCategories.some((c) => c.key === categoryRaw)) {
     return { error: "تصنيف غير صالح." };
   }
-  const category = categoryRaw || DEFAULT_CATEGORY;
+  // No single global "OTHER" fallback exists anymore now that categories
+  // are per-project and fully editable — fall back to this project's first
+  // category (by its own `order`) as the closest equivalent "default"
+  // choice. If a project has been left with zero categories, category mode
+  // can't meaningfully be OPTIONAL — surfaced as an explicit error instead
+  // of crashing or writing an empty string into a non-nullable column.
+  const category = categoryRaw || projectCategories[0]?.key;
+  if (!category) {
+    return { error: "لا توجد تصنيفات معرّفة لهذا المشروع بعد. يرجى التواصل مع فريق الدعم." };
+  }
 
   if (project.priorityMode === "REQUIRED" && !priorityRaw) {
     return { error: "يرجى اختيار أولوية المشكلة." };
@@ -158,7 +168,16 @@ export async function createTicketAction(
   let ticket: { id: string; ticketNumber: string; subject: string; submitterEmail: string | null; category: string };
   try {
     const createdAt = new Date();
-    const slaDueAt = computeSlaDueAt(priority, createdAt);
+    const slaDueAt = computeSlaDueAt(
+      priority,
+      {
+        slaUrgentHours: project.slaUrgentHours,
+        slaHighDays: project.slaHighDays,
+        slaMediumDays: project.slaMediumDays,
+        slaLowDays: project.slaLowDays,
+      },
+      createdAt
+    );
     ticketNumber = await generateTicketNumber(project.id);
 
     // The ticket row and its custom-field values are the atomic "did the
@@ -227,7 +246,7 @@ export async function createTicketAction(
         ticketNumber: ticket.ticketNumber,
         subject: ticket.subject,
         submitterEmail: ticket.submitterEmail,
-        category: ticket.category,
+        categoryLabel: projectCategories.find((c) => c.key === ticket.category)?.label ?? ticket.category,
       },
       { id: project.id, slug: project.slug, name: project.name }
     );

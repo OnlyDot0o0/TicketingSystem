@@ -6,7 +6,11 @@ as a single-tenant tool for **رقابة+** (RAQABA+), was refactored into a
 **project-scoped access control**, per-project ticket-form configuration,
 canned responses, tags, an activity/audit log, and several security
 hardening features (honeypot, rate limiting, optional CAPTCHA, self-service
-password reset).
+password reset). Later rounds added custom roles and custom ticket-form
+fields (v3), CSAT/bulk actions/CSV export (v4), a hardening pass (v5), and
+most recently (v6) **per-project ticket categories and per-project SLA
+timings**, closing out the last two pieces of ticket-form configuration
+that used to be global.
 
 ## Multi-project architecture
 
@@ -17,9 +21,10 @@ password reset).
   (`Ticket.projectId`), and all public-facing pages are scoped by project
   via the URL.
 - **Per-project customization**: branding (name, accent color, FAQ URL,
-  ticket prefix) **and now the ticket-form field configuration** (see
-  below). Ticket **categories** and **SLA-by-priority timings** are still
-  global/shared across all projects.
+  ticket prefix), the ticket-form field configuration, and — as of v6 —
+  ticket **categories** and **SLA-by-priority timings** too (see "Per-project
+  ticket categories" and "Per-project SLA timings" below). Nothing about a
+  project's configuration is global/shared anymore.
 - **Ticket numbering is per-project**: each `Project` has its own `ticketSeq`
   counter, incremented transactionally (`{ increment: 1 }` in the same
   `project.update()` call that reads the new value back), so numbers like
@@ -313,6 +318,230 @@ only at the UI layer, unique on `(ticketId, customFieldId)`).
     if the label has no transliterable characters, e.g. a purely Arabic
     label) and de-duplicated with a numeric suffix if it collides within
     the same project.
+
+## Per-project ticket categories (v6)
+
+Replaces the old hardcoded global category list (`LOGIN_CONNECTIVITY` /
+`ROUTES_PATROLS` / `RECORDS_DATES` / `PHOTOS_ATTACHMENTS` / `PERFORMANCE` /
+`OTHER`) with a real `Category` model — **same shape/pattern as
+`CustomField`**: `id`, `projectId`, `key`, `label`, `order`, `createdAt`,
+unique on `(projectId, key)`. `Ticket.category` keeps storing a plain string
+key exactly as before (no schema change to `Ticket` itself) — what changed
+is that the SET of valid keys is now per-project instead of a single global
+list.
+
+- **Migration for existing data**: the schema migration
+  (`prisma/migrations/20260817082510_add_categories_and_sla`) includes a
+  hand-written backfill `INSERT ... SELECT ... FROM "Project"` that seeds
+  every project that already existed at migration time with the same 6
+  default categories, using the **exact same key strings** every existing
+  `Ticket.category` value already stored — so nothing became orphaned.
+  Verified directly against this app's real dev.db (see "Verification
+  performed (v6)" below): all pre-existing tickets across `raqaba`, `demo`,
+  and `acme` (plus a leftover `audittest` project from an earlier
+  verification round) still resolved to a real category with zero orphans.
+- **New projects**: `createProjectAction` seeds the same default 6-category
+  set (`DEFAULT_CATEGORIES` in `src/lib/categories.ts`) on creation, fully
+  editable afterward — the public ticket form works immediately instead of
+  requiring manual category setup first. `prisma/seed.ts` does the same
+  (idempotent `upsert`) for `raqaba`/`demo`/`acme` so a fresh
+  `migrate reset && seed` reproduces the same category keys the sample
+  tickets already reference.
+- **Management UI**: a new "تصنيفات التذاكر" card on
+  `/dashboard/projects/[id]` (`CategoriesManager.tsx`), gated by
+  `canManageTicketForm` — same gate, same add/edit/reorder(↑/↓)/delete
+  pattern as the existing custom-fields card right above it. `key` is
+  derived from `label` via `deriveCategoryKey()` (`src/lib/categories.ts`),
+  which reuses `CustomField`'s `slugifyKey()` and converts it to
+  `SCREAMING_SNAKE_CASE` so a freshly created category's key reads
+  consistently with the seeded defaults (e.g. `LOGIN_CONNECTIVITY`). Like
+  `CustomField.key`, `key` is **not editable after creation** — only
+  `label` and `order` are.
+  - **Deleting a category currently referenced by any ticket is blocked**,
+    with an error naming how many tickets are affected — same precedent as
+    `deleteCustomRoleAction` blocking deletion of an in-use `CustomRole`.
+  - **Deleting a project's last remaining category is also blocked.**
+    `Ticket.category` is a non-nullable column, so a project with zero
+    categories could never again produce a valid ticket (an empty dropdown
+    on the public form, and no default left to fall back to when
+    `categoryMode` is `OPTIONAL`). Not explicitly asked for, but a direct
+    consequence of the non-nullable column — surfaced as a clear error
+    rather than letting a project accidentally break its own public form.
+- **Public ticket form** (`/{slug}/tickets/new`): the category dropdown now
+  sources from the project's own `Category` list instead of a hardcoded
+  array. **Server-side re-validation in `createTicketAction`** re-fetches
+  this project's actual categories and checks the submitted key against
+  those — never the old global array — so a spoofed category value (e.g.
+  injected via devtools) is rejected with "تصنيف غير صالح." and no ticket
+  is created. **Verified live** (see below).
+  - There's no longer a single global `"OTHER"` to fall back to when
+    `categoryMode` is `OPTIONAL` and left blank — the server instead
+    defaults to the project's own first category by `order`. This is a
+    deliberate judgment call: previously "leave category blank → OTHER"
+    was unambiguous because `OTHER` was a fixed global key; now that
+    categories are per-project and fully renameable/reorderable, "the
+    project's first category" is the closest equivalent "default choice"
+    without inventing a new "is this the fallback" flag on `Category`.
+- **Reports page** (`/dashboard/reports`): the "التذاكر حسب التصنيف" (by
+  category) breakdown now sources the active project's own `Category` list
+  instead of the old global `CATEGORY_LABELS` object.
+  - **When a specific project is selected** (or the viewer only has access
+    to exactly one project), the chart renders exactly as before, just
+    sourced per-project.
+  - **When viewing multiple/all projects at once** (`SUPER_ADMIN`, or an
+    `ADMIN` with more than one project membership, with no `projectId`
+    filter applied), the chart is **not rendered** — a short note tells the
+    viewer to pick a specific project instead. **Deliberate judgment
+    call**: different projects' categories can use unrelated (or
+    coincidentally colliding) keys now that the list isn't global, so there
+    is no single meaningful axis left to chart tickets from multiple
+    projects on at once. Grouping by the raw stored key (the other option
+    the spec allowed for) was considered and rejected — it would render a
+    non-Arabic, DB-internal-looking key like `LOGIN_CONNECTIVITY` right
+    next to a human label like "اختبار QA" from a different project's
+    similarly-shaped-but-different category, which reads as more confusing
+    than a chart that isn't shown at all. The other three charts (status,
+    CSAT, 30-day time series) are unaffected and still render for the
+    all-projects view, since status/CSAT/time are genuinely global axes.
+  - The ticket-queue category **filter** dropdown (`/dashboard`) has the
+    same underlying limitation: when a single project is already selected
+    it lists just that project's categories, but when viewing multiple/all
+    projects it groups categories under an `<optgroup>` per project (so the
+    picked value is still an unambiguous, specific project's category key)
+    rather than hiding the filter entirely — filtering by category was
+    judged useful enough even across projects to keep, unlike the reports
+    chart, since picking one option from a grouped list is a much smaller
+    ask of the viewer than reading an aggregated chart correctly.
+- **Straggler global-map references cleaned up**: `CATEGORY_LABELS` in
+  `src/lib/config.ts` has been removed entirely. Every place that used to
+  read from it now resolves a label from the relevant project's own
+  `Category` list instead (falling back to the raw stored key if a lookup
+  ever misses, same graceful-degradation spirit as the old
+  `CATEGORY_LABELS[x] ?? x`): the ticket queue table and CSV export (both
+  now preload a `{projectId}:{key} -> label` map scoped to every project the
+  viewer can access), the ticket detail page, the public ticket-tracking
+  page, the ticket-detail category `<select>` (`TicketControls.tsx`), and
+  the `CATEGORY_CHANGED` activity-log entry (`updateTicketAction` now
+  re-validates the submitted category against the ticket's own project
+  before applying it or logging the change — the same spoof-rejection
+  discipline as every other field on that action).
+
+## Per-project SLA timings (v6)
+
+Replaces the fixed global SLA-by-priority timings in `src/lib/sla.ts`
+(`URGENT` = 4h, `HIGH`/`MEDIUM`/`LOW` = 1/3/5 business days) with four
+plain columns directly on `Project`: `slaUrgentHours`, `slaHighDays`,
+`slaMediumDays`, `slaLowDays` — same reasoning as the existing field-mode
+columns (`emailMode` etc.): a small, fixed set of numbers, not worth a
+separate table. Column defaults (`4`/`1`/`3`/`5`) exactly match the old
+global constants, so every existing project keeps today's exact SLA
+behavior unless someone explicitly edits it.
+
+- `computeSlaDueAt()` (`src/lib/sla.ts`) now takes an `SlaConfig` object
+  (the 4 fields above) instead of reading hardcoded constants. The only
+  call site in the app, `createTicketAction`
+  (`src/app/[slug]/tickets/new/actions.ts`), threads the ticket's own
+  project's config through when computing a new ticket's `slaDueAt` — there
+  is no other place in the codebase that (re)computes an SLA due date
+  (confirmed by search), so there was nothing else to update.
+- **Management UI**: a new "مهلة الاستجابة (SLA)" card on
+  `/dashboard/projects/[id]` (`SlaConfigForm.tsx`), same
+  `canManageTicketForm` gate, with 4 number inputs (min `1`, integer). Saved
+  by `updateSlaConfigAction`, which rejects non-positive/non-integer values
+  server-side (never trusts the `min`/`type="number"` HTML attributes
+  alone) and logs a `PROJECT_SLA_UPDATED` `AdminActivity` entry, same
+  pattern as the ticket-form-config save right above it.
+
+## Verification performed (v6 — per-project categories + SLA)
+
+- `npx prisma migrate dev` (new migration `add_categories_and_sla`, with a
+  hand-written data-migration backfill — see "Per-project ticket
+  categories" above), `npx tsc --noEmit`, and `npm run build` (fresh
+  `.next`) all run clean.
+- **Migration backfill, verified directly against this app's real dev.db**
+  (not a fresh reset): every project that already existed (`raqaba`,
+  `demo`, `acme`, plus a leftover `audittest` project) got exactly the same
+  6 default categories with the exact same key strings tickets already
+  used; a direct query over every ticket confirmed **zero** tickets whose
+  `category` value didn't resolve to a real `Category` row in its own
+  project.
+- Manually exercised end-to-end in a real browser against the dev server
+  (logged in as `admin@raqaba.local`, `SUPER_ADMIN`, unless noted):
+  - Added a new category ("اختبار QA", auto-derived key `QA`) to `raqaba`
+    from `/dashboard/projects/[id]`; confirmed it immediately appeared in
+    `raqaba`'s public form dropdown (`/raqaba/tickets/new`) and **did not**
+    appear on `demo`'s form (`/demo/tickets/new`) — confirmed by reading
+    each form's actual `<select>` options.
+  - Spoofed an invalid category value on `raqaba`'s public form (injected a
+    bogus `<option>` via devtools/JS, selected it, force-submitted) —
+    server rejected with "تصنيف غير صالح." and created no ticket (confirmed
+    by querying the DB for the submitted subject afterward — no row).
+    Submitting the same form with the legitimate new "اختبار QA" category
+    afterward succeeded normally (`RQ-000008`).
+  - Attempted to delete the "اختبار QA" category while `RQ-000008` still
+    referenced it — blocked with "لا يمكن حذف هذا التصنيف — هناك 1
+    تذكرة(تذاكر) لا تزال مصنّفة به."; created and then deleted a second,
+    unused throwaway category ("مؤقت للحذف") — succeeded immediately.
+  - Changed `raqaba`'s `slaUrgentHours` from `4` to `1`, created a new
+    `URGENT` ticket on `raqaba` (`RQ-000009`) and confirmed its `slaDueAt`
+    was exactly 1 hour after `createdAt` (queried directly from the DB);
+    created a new `URGENT` ticket on `demo` (`DEMO-000003`) in the same
+    session and confirmed its `slaDueAt` was still the unchanged 4-hour
+    default — the two projects' SLA configs are independent. Reverted
+    `raqaba`'s value back to `4` afterward to match the documented seed
+    defaults.
+  - Spot-checked several pre-existing seeded tickets across `raqaba` and
+    `demo` on `/dashboard` (the ticket queue) and confirmed every category
+    badge still renders its correct Arabic label (not a raw key or a
+    blank), including tickets whose category is one of the original 6
+    defaults.
+  - Changed an existing ticket's (`RQ-000001`) category from "الدخول
+    والاتصال" to "اختبار QA" via `/dashboard/tickets/[id]` and confirmed
+    the "سجل النشاط" (activity log) recorded "غيّر التصنيف من الدخول
+    والاتصال إلى اختبار QA" with correctly-resolved labels on both sides;
+    reverted it back afterward.
+  - Confirmed the public "تتبع تذكرتك" (track ticket) page
+    (`/raqaba/tickets/track`) also resolves the category label correctly
+    for a ticket with the new custom category.
+  - Fetched `/dashboard/export.csv?projectId=<raqaba>` directly and
+    confirmed the "التصنيف" column shows resolved Arabic labels (including
+    "اختبار QA") rather than raw keys, with the UTF-8 BOM still intact.
+  - `/dashboard/reports`: with no project filter (`SUPER_ADMIN`, multiple
+    projects in scope) the category chart correctly shows the "select a
+    project" note instead of rendering; selecting `raqaba` specifically
+    switched it to a real per-category bar chart sourced from `raqaba`'s
+    own categories.
+  - Created a brand-new project (`qacheck`) through
+    `/dashboard/projects` and confirmed it was seeded with the same default
+    6 categories and default SLA columns (`4`/`1`/`3`/`5`), and that its
+    public form (`/qacheck/tickets/new`) worked immediately with those
+    categories with zero manual setup.
+
+## Deviations / judgment calls (v6)
+
+- **Reports "all projects" category chart**: not rendered when multiple/all
+  projects are in view (see "Per-project ticket categories" above for the
+  full reasoning) — the spec explicitly allowed either this or a
+  raw-key grouping, and this was judged the less confusing option.
+- **OPTIONAL category fallback**: defaults to the project's first category
+  by `order` (instead of a fixed `"OTHER"` key, which no longer universally
+  exists) when `categoryMode` is `OPTIONAL` and left blank.
+- **Deleting a project's last category is blocked**, in addition to the
+  explicitly-requested "blocked while in use by a ticket" rule — a direct
+  consequence of `Ticket.category` staying non-nullable.
+- **Category `key` derivation reuses `CustomField`'s `slugifyKey()`**
+  (converted to `SCREAMING_SNAKE_CASE`) rather than a parallel
+  implementation, per the instruction that categories should follow the
+  exact same shape/pattern as custom fields. Its fallback prefix for
+  labels with no transliterable ASCII characters (common in this
+  Arabic-first app) was renamed from `FIELD_` to `CATEGORY_` so a
+  purely-Arabic category's generated key doesn't read like a leftover
+  custom-field artifact.
+- **The ticket-queue category filter groups by project (`<optgroup>`)
+  rather than being hidden** when viewing multiple/all projects, unlike the
+  reports chart — picking one option from a grouped list was judged a much
+  smaller ask than reading an aggregated chart correctly, so the filter
+  stays useful even without a single global category list.
 
 ## CSAT, bulk actions, CSV export, "my tickets" filter (v4)
 
@@ -747,8 +976,17 @@ What's actually in place for this:
 
 ## Known gaps / TODOs
 
-- Per-project ticket categories and SLA timings are still global, not
-  per-project (unchanged from v1).
+- (v6) The reports page's "by category" breakdown doesn't render at all
+  when multiple/all projects are in view (no `projectId` filter applied) —
+  see "Per-project ticket categories" above for why. A viewer who wants
+  that chart has to pick one project at a time; there's no combined
+  cross-project category view.
+- (v6) The ticket-queue category filter's `<optgroup>`-per-project grouping
+  means picking a category when viewing multiple/all projects still only
+  ever filters by that one project's specific key — there's no "show me
+  every project's 'الأداء'-equivalent category at once" option, since
+  categories are independent per-project strings with no cross-project
+  identity.
 - File uploads are stored on local disk (`uploads/`) — fine for a single
   server / local dev, but needs to move to object storage (S3/R2) for a
   serverless or multi-instance production deploy.

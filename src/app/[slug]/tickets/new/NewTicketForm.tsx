@@ -3,7 +3,7 @@
 import Script from "next/script";
 import { useFormState, useFormStatus } from "react-dom";
 import { createTicketAction, CreateTicketState } from "./actions";
-import { CATEGORY_LABELS, PRIORITY_LABELS } from "@/lib/config";
+import { PRIORITY_LABELS } from "@/lib/config";
 import type { TicketFormConfig } from "@/lib/projects";
 import type { CaptchaConfig } from "@/lib/captcha";
 import { parseOptions } from "@/lib/customFields";
@@ -90,11 +90,13 @@ export default function NewTicketForm({
   slug,
   config,
   captcha,
+  categories,
   customFields,
 }: {
   slug: string;
   config: TicketFormConfig;
   captcha: CaptchaConfig;
+  categories: { key: string; label: string }[];
   customFields: CustomFieldConfig[];
 }) {
   const [state, formAction] = useFormState(createTicketAction.bind(null, slug), initialState);
@@ -167,11 +169,11 @@ export default function NewTicketForm({
             id="category"
             name="category"
             className="field"
-            defaultValue={config.categoryMode === "REQUIRED" ? "OTHER" : ""}
+            defaultValue={config.categoryMode === "REQUIRED" ? categories[0]?.key ?? "" : ""}
           >
             {config.categoryMode !== "REQUIRED" && <option value="">بدون تحديد</option>}
-            {Object.entries(CATEGORY_LABELS).map(([value, label]) => (
-              <option key={value} value={value}>
+            {categories.map(({ key, label }) => (
+              <option key={key} value={key}>
                 {label}
               </option>
             ))}

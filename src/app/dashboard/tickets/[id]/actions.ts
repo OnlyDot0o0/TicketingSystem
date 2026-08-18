@@ -5,8 +5,9 @@ import { auth } from "@/lib/auth";
 import { getViewerScope, canAccessProject } from "@/lib/access";
 import { saveUploadedFile, UploadValidationError } from "@/lib/upload";
 import { notifyAgentReply, notifyResolved } from "@/lib/notifications";
-import { STATUS_LABELS, PRIORITY_LABELS, CATEGORY_LABELS } from "@/lib/config";
+import { STATUS_LABELS, PRIORITY_LABELS } from "@/lib/config";
 import { validateCustomFieldValue } from "@/lib/customFields";
+import { categoryLabel } from "@/lib/categories";
 import { revalidatePath } from "next/cache";
 
 export type AgentReplyState = { error?: string };
@@ -124,8 +125,21 @@ export async function updateTicketAction(formData: FormData) {
     activities.push({ action: "PRIORITY_CHANGED", fromValue: PRIORITY_LABELS[ticket.priority] || ticket.priority, toValue: PRIORITY_LABELS[priority] || priority });
   }
   if (category && category !== ticket.category) {
-    data.category = category;
-    activities.push({ action: "CATEGORY_CHANGED", fromValue: CATEGORY_LABELS[ticket.category] || ticket.category, toValue: CATEGORY_LABELS[category] || category });
+    // Categories are per-project (v6) — re-validate the submitted key
+    // against this ticket's own project, never trust the client. A select
+    // element only ever offers this project's own categories, but a
+    // spoofed value (e.g. another project's category key via devtools)
+    // must still be rejected server-side here, same as every other
+    // ticket-editing action in this app.
+    const projectCategories = await prisma.category.findMany({ where: { projectId: ticket.projectId } });
+    if (projectCategories.some((c) => c.key === category)) {
+      data.category = category;
+      activities.push({
+        action: "CATEGORY_CHANGED",
+        fromValue: categoryLabel(projectCategories, ticket.category),
+        toValue: categoryLabel(projectCategories, category),
+      });
+    }
   }
   if (assignedToRaw !== null && assignedToRaw !== (ticket.assignedToId || "")) {
     data.assignedToId = assignedToRaw === "" ? null : assignedToRaw;

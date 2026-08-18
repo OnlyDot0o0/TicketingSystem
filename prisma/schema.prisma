@@ -10,7 +10,9 @@
 //
 // Allowed values:
 //   User.role         : "ADMIN" | "AGENT" | "SUPER_ADMIN" | "CUSTOM"
-//   Ticket.category    : "LOGIN_CONNECTIVITY" | "ROUTES_PATROLS" | "RECORDS_DATES" | "PHOTOS_ATTACHMENTS" | "PERFORMANCE" | "OTHER"
+//   Ticket.category    : a project-defined Category.key (see Category model below) — a
+//                         plain string column, same as before, but the SET of valid
+//                         values is now per-project instead of a fixed global list.
 //   Ticket.priority     : "LOW" | "MEDIUM" | "HIGH" | "URGENT"
 //   Ticket.status       : "NEW" | "OPEN" | "PENDING" | "RESOLVED" | "CLOSED"
 //   TicketMessage.authorType : "SUBMITTER" | "AGENT"
@@ -20,9 +22,8 @@
 //   CustomField.fieldType : "TEXT" | "TEXTAREA" | "NUMBER" | "DATE" | "SELECT" | "CHECKBOX"
 //   AdminActivity.targetType : "PROJECT" | "ROLE" | "AGENT"
 //
-// Categories and SLA-by-priority timings are GLOBAL/shared across all
-// projects. Support-team users are now project-scoped (v2): SUPER_ADMIN
-// stays global/unscoped; ADMIN and AGENT require a ProjectMembership row to
+// Support-team users are project-scoped (v2): SUPER_ADMIN stays
+// global/unscoped; ADMIN and AGENT require a ProjectMembership row to
 // see/work anything, see the Project/ProjectMembership models below.
 //
 // v3: SUPER_ADMIN-only CustomRole rows let a project-scoped account be a
@@ -38,6 +39,16 @@
 // (self-service TOTP 2FA). A new AdminActivity model mirrors TicketActivity
 // but for administrative actions (project/role/team changes) that
 // previously left no audit trail — see /dashboard/audit (SUPER_ADMIN-only).
+//
+// v6: ticket categories and SLA-by-priority timings are now per-project,
+// closing out the two items that were previously called out as still
+// global. Categories became a real Category model (id, projectId, key,
+// label, order, createdAt) — same shape as CustomField, managed the same
+// way from /dashboard/projects/[id]. SLA targets became four plain columns
+// directly on Project (slaUrgentHours/slaHighDays/slaMediumDays/slaLowDays)
+// — same reasoning as the existing field-mode columns: a small, fixed set
+// of numbers, not worth a separate table. Column defaults preserve today's
+// exact global behavior (4h/1d/3d/5d) for every existing project.
 
 generator client {
   provider = "prisma-client-js"
@@ -132,11 +143,43 @@ model Project {
   priorityMode       String @default("REQUIRED")
   attachmentsMode    String @default("OPTIONAL")
 
+  // Per-project SLA-by-priority targets (v6). Defaults match the exact
+  // values that used to be hardcoded globally in src/lib/sla.ts, so every
+  // existing project keeps today's behavior unless explicitly edited.
+  // Urgent is wall-clock hours; the other three are business days (see
+  // computeSlaDueAt in src/lib/sla.ts for the business-day calendar logic).
+  slaUrgentHours Int @default(4)
+  slaHighDays    Int @default(1)
+  slaMediumDays  Int @default(3)
+  slaLowDays     Int @default(5)
+
   tickets         Ticket[]
   memberships     ProjectMembership[]
   cannedResponses CannedResponse[]
   tags            Tag[]
   customFields    CustomField[]
+  categories      Category[]
+}
+
+// A project-defined ticket category (v6) — same shape/pattern as
+// CustomField. `key` is what's actually stored on Ticket.category (a plain
+// string column, unchanged); `label` is the Arabic display text. Managed
+// from /dashboard/projects/[id], gated by canManageTicketForm — same gate
+// as the built-in field-mode controls and CustomField definitions. Deleting
+// a category currently referenced by any ticket is blocked (see
+// deleteCategoryAction), same precedent as deleteCustomRoleAction blocking
+// deletion of an in-use CustomRole.
+model Category {
+  id        String   @id @default(cuid())
+  projectId String
+  project   Project  @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  key       String
+  label     String
+  order     Int      @default(0)
+  createdAt DateTime @default(now())
+
+  @@unique([projectId, key])
+  @@index([projectId])
 }
 
 // A project-defined custom ticket-form field (v3). Rendered on the public

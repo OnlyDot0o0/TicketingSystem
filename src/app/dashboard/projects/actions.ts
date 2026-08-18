@@ -11,6 +11,7 @@ import {
 } from "@/lib/projects";
 import { getViewerScope, canAccessProject } from "@/lib/access";
 import { isValidFieldType, slugifyKey, serializeOptions, parseOptions } from "@/lib/customFields";
+import { DEFAULT_CATEGORIES, deriveCategoryKey } from "@/lib/categories";
 import { revalidatePath } from "next/cache";
 
 export type ProjectFormState = { error?: string; success?: string };
@@ -49,8 +50,16 @@ export async function createProjectAction(
   const existingSlug = await prisma.project.findUnique({ where: { slug } });
   if (existingSlug) return { error: "يوجد مشروع بنفس المعرّف مسبقًا." };
 
-  await prisma.project.create({
+  const project = await prisma.project.create({
     data: { name, slug, ticketPrefix, accentColorHex, faqUrl },
+  });
+
+  // Every new project starts with the same default 6-category set the app
+  // used to share globally (v6) — fully editable afterward from this page,
+  // but the public ticket form works immediately instead of requiring
+  // manual category setup first.
+  await prisma.category.createMany({
+    data: DEFAULT_CATEGORIES.map((c, i) => ({ projectId: project.id, key: c.key, label: c.label, order: i })),
   });
 
   await prisma.adminActivity.create({
@@ -380,4 +389,166 @@ export async function moveCustomFieldAction(id: string, direction: "up" | "down"
   ]);
 
   revalidatePath(`/dashboard/projects/${field.projectId}`);
+}
+
+// --- Ticket categories (v6) ---------------------------------------------
+// Same shape/pattern and same canManageTicketForm gate as the custom-field
+// definitions above. `key` is derived from `label` via the same
+// slugifyKey() used for custom fields, de-duplicated per project the same
+// way. Unlike CustomField, there's no `fieldType` to keep immutable — the
+// only thing that must never change after tickets start referencing it is
+// `key` itself (it's what's actually stored on Ticket.category), so `key`
+// stays fixed after creation while `label` and `order` remain editable.
+
+export type CategoryFormState = { error?: string; success?: string };
+
+export async function createCategoryAction(
+  _prev: CategoryFormState,
+  formData: FormData
+): Promise<CategoryFormState> {
+  const projectId = String(formData.get("projectId") || "");
+  const scope = await requireTicketFormManager(projectId);
+  if (!scope) return { error: "غير مصرح." };
+
+  const label = String(formData.get("label") || "").trim();
+  if (!label) return { error: "يرجى كتابة تسمية التصنيف." };
+
+  let key = deriveCategoryKey(label);
+  let suffix = 1;
+  while (await prisma.category.findUnique({ where: { projectId_key: { projectId, key } } })) {
+    suffix += 1;
+    key = `${deriveCategoryKey(label)}_${suffix}`;
+  }
+
+  const maxOrder = await prisma.category.aggregate({ where: { projectId }, _max: { order: true } });
+
+  await prisma.category.create({
+    data: { projectId, key, label, order: (maxOrder._max.order ?? -1) + 1 },
+  });
+
+  revalidatePath(`/dashboard/projects/${projectId}`);
+  return { success: "تم إضافة التصنيف." };
+}
+
+export async function updateCategoryAction(
+  _prev: CategoryFormState,
+  formData: FormData
+): Promise<CategoryFormState> {
+  const id = String(formData.get("id") || "");
+  const category = await prisma.category.findUnique({ where: { id } });
+  if (!category) return { error: "التصنيف غير موجود." };
+
+  const scope = await requireTicketFormManager(category.projectId);
+  if (!scope) return { error: "غير مصرح." };
+
+  const label = String(formData.get("label") || "").trim();
+  if (!label) return { error: "يرجى كتابة تسمية التصنيف." };
+
+  // `key` is intentionally not editable after creation — it's what's
+  // already stored on every existing Ticket.category value for this
+  // category, and changing it out from under those tickets would silently
+  // orphan them (same reasoning as CustomField.key/fieldType being
+  // immutable — see src/app/dashboard/projects/actions.ts above).
+  await prisma.category.update({ where: { id }, data: { label } });
+
+  revalidatePath(`/dashboard/projects/${category.projectId}`);
+  return { success: "تم حفظ التعديلات." };
+}
+
+export type DeleteCategoryResult = { error?: string; success?: boolean };
+
+// Blocks deleting a category that's still referenced by any ticket, rather
+// than silently orphaning those tickets' `category` value — same precedent
+// as deleteCustomRoleAction blocking deletion of an in-use CustomRole (see
+// src/app/dashboard/roles/actions.ts). Also blocks deleting a project's
+// LAST remaining category: Ticket.category is a non-nullable column, so a
+// project with zero categories can never again produce a valid ticket
+// (the public form's dropdown would be empty, and a REQUIRED/OPTIONAL
+// categoryMode both need at least one real category to fall back to).
+export async function deleteCategoryAction(id: string): Promise<DeleteCategoryResult> {
+  const category = await prisma.category.findUnique({ where: { id } });
+  if (!category) return { error: "التصنيف غير موجود." };
+
+  const scope = await requireTicketFormManager(category.projectId);
+  if (!scope) return { error: "غير مصرح." };
+
+  const [inUseCount, totalCount] = await Promise.all([
+    prisma.ticket.count({ where: { projectId: category.projectId, category: category.key } }),
+    prisma.category.count({ where: { projectId: category.projectId } }),
+  ]);
+  if (inUseCount > 0) {
+    return { error: `لا يمكن حذف هذا التصنيف — هناك ${inUseCount} تذكرة(تذاكر) لا تزال مصنّفة به.` };
+  }
+  if (totalCount <= 1) {
+    return { error: "لا يمكن حذف آخر تصنيف في المشروع — يجب أن يبقى تصنيف واحد على الأقل." };
+  }
+
+  await prisma.category.delete({ where: { id } });
+  revalidatePath(`/dashboard/projects/${category.projectId}`);
+  return { success: true };
+}
+
+// Swaps this category's `order` with its immediate neighbor — same simple
+// adjacent-swap reordering as moveCustomFieldAction above.
+export async function moveCategoryAction(id: string, direction: "up" | "down") {
+  const category = await prisma.category.findUnique({ where: { id } });
+  if (!category) return;
+  const scope = await requireTicketFormManager(category.projectId);
+  if (!scope) return;
+
+  const siblings = await prisma.category.findMany({
+    where: { projectId: category.projectId },
+    orderBy: { order: "asc" },
+  });
+  const idx = siblings.findIndex((s) => s.id === id);
+  const swapIdx = direction === "up" ? idx - 1 : idx + 1;
+  if (idx === -1 || swapIdx < 0 || swapIdx >= siblings.length) return;
+
+  const other = siblings[swapIdx];
+  await prisma.$transaction([
+    prisma.category.update({ where: { id: category.id }, data: { order: other.order } }),
+    prisma.category.update({ where: { id: other.id }, data: { order: category.order } }),
+  ]);
+
+  revalidatePath(`/dashboard/projects/${category.projectId}`);
+}
+
+// --- Per-project SLA-by-priority targets (v6) ----------------------------
+// Same canManageTicketForm gate as everything else on this page. Column
+// defaults on Project preserve today's global values, so leaving this form
+// untouched changes nothing for an existing project.
+
+export async function updateSlaConfigAction(
+  _prev: ProjectFormState,
+  formData: FormData
+): Promise<ProjectFormState> {
+  const projectId = String(formData.get("projectId") || "");
+  const scope = await requireTicketFormManager(projectId);
+  if (!scope) return { error: "غير مصرح." };
+
+  const slaUrgentHours = Number(formData.get("slaUrgentHours"));
+  const slaHighDays = Number(formData.get("slaHighDays"));
+  const slaMediumDays = Number(formData.get("slaMediumDays"));
+  const slaLowDays = Number(formData.get("slaLowDays"));
+
+  const values = { slaUrgentHours, slaHighDays, slaMediumDays, slaLowDays };
+  for (const [k, v] of Object.entries(values)) {
+    if (!Number.isInteger(v) || v <= 0) {
+      return { error: "يرجى إدخال قيم صحيحة أكبر من صفر لجميع مهل الاستجابة (SLA)." };
+    }
+  }
+
+  const updated = await prisma.project.update({ where: { id: projectId }, data: values });
+
+  await prisma.adminActivity.create({
+    data: {
+      actorName: scope.name || "مدير",
+      action: "PROJECT_SLA_UPDATED",
+      targetType: "PROJECT",
+      targetLabel: updated.name,
+    },
+  });
+
+  revalidatePath(`/dashboard/projects/${projectId}`);
+  return { success: "تم حفظ إعدادات مهلة الاستجابة (SLA)." };
 }

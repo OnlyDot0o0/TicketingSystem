@@ -1,6 +1,6 @@
 import Link from "next/link";
 import { prisma } from "@/lib/prisma";
-import { CATEGORY_LABELS, PRIORITY_LABELS, STATUS_LABELS } from "@/lib/config";
+import { PRIORITY_LABELS, STATUS_LABELS } from "@/lib/config";
 import { requireScopedViewer } from "@/lib/access";
 import { buildTicketQueueWhere, buildTicketQueueOrderBy, TicketQueueFilters } from "@/lib/ticketQueue";
 import TicketQueueTable from "./TicketQueueTable";
@@ -23,7 +23,7 @@ export default async function DashboardTicketsPage({
 
   const accessibleProjectWhere = scope.isSuperAdmin ? undefined : { id: { in: scope.projectIds || [] } };
 
-  const [total, tickets, agents, projects, tags] = await Promise.all([
+  const [total, tickets, agents, projects, tags, categories] = await Promise.all([
     prisma.ticket.count({ where }),
     prisma.ticket.findMany({
       where,
@@ -43,7 +43,38 @@ export default async function DashboardTicketsPage({
         }),
     prisma.project.findMany({ where: accessibleProjectWhere, orderBy: { name: "asc" } }),
     prisma.tag.findMany({ where: accessibleProjectWhere ? { projectId: { in: scope.projectIds || [] } } : undefined, orderBy: { name: "asc" } }),
+    // Categories are per-project now (v6) — fetch every accessible
+    // project's own list (there's no more single global set to iterate for
+    // the filter dropdown), used both for the filter below and for
+    // resolving each row's category label in the table.
+    prisma.category.findMany({
+      where: accessibleProjectWhere ? { projectId: { in: scope.projectIds || [] } } : undefined,
+      orderBy: [{ projectId: "asc" }, { order: "asc" }],
+    }),
   ]);
+
+  // key = `${projectId}:${categoryKey}` -> label, so TicketQueueTable can
+  // resolve each row's own project's category label without needing the
+  // full per-project list itself.
+  const categoryLabelMap = Object.fromEntries(categories.map((c) => [`${c.projectId}:${c.key}`, c.label]));
+
+  // Category filter <select>: when a single project is already selected
+  // (via the project filter), show just that project's own categories —
+  // unambiguous. Otherwise (viewing multiple/all projects at once), group
+  // by project under an <optgroup> since category keys can collide across
+  // projects (e.g. every project starts with the same default "OTHER" key)
+  // and the filter still needs to pick one project's specific category.
+  const categoryFilterProjectId = searchParams.projectId;
+  const categoriesForFilter = categoryFilterProjectId
+    ? categories.filter((c) => c.projectId === categoryFilterProjectId)
+    : categories;
+  const categoriesByProject = new Map<string, typeof categories>();
+  for (const c of categoriesForFilter) {
+    const list = categoriesByProject.get(c.projectId) || [];
+    list.push(c);
+    categoriesByProject.set(c.projectId, list);
+  }
+  const projectNameById = new Map(projects.map((p) => [p.id, p.name]));
 
   const totalPages = Math.max(1, Math.ceil(total / PAGE_SIZE));
 
@@ -120,9 +151,17 @@ export default async function DashboardTicketsPage({
         </select>
         <select name="category" defaultValue={searchParams.category || ""} className="field">
           <option value="">كل التصنيفات</option>
-          {Object.entries(CATEGORY_LABELS).map(([v, l]) => (
-            <option key={v} value={v}>{l}</option>
-          ))}
+          {categoryFilterProjectId
+            ? categoriesForFilter.map((c) => (
+                <option key={c.id} value={c.key}>{c.label}</option>
+              ))
+            : Array.from(categoriesByProject.entries()).map(([projectId, cats]) => (
+                <optgroup key={projectId} label={projectNameById.get(projectId) || projectId}>
+                  {cats.map((c) => (
+                    <option key={c.id} value={c.key}>{c.label}</option>
+                  ))}
+                </optgroup>
+              ))}
         </select>
         <select name="priority" defaultValue={searchParams.priority || ""} className="field">
           <option value="">كل الأولويات</option>
@@ -162,7 +201,13 @@ export default async function DashboardTicketsPage({
         <Link href="/dashboard" className="btn btn-outline text-center sm:col-span-1">مسح</Link>
       </form>
 
-      <TicketQueueTable tickets={tickets} agents={agents} tags={tags} currentUserId={scope.userId} />
+      <TicketQueueTable
+        tickets={tickets}
+        agents={agents}
+        tags={tags}
+        currentUserId={scope.userId}
+        categoryLabelMap={categoryLabelMap}
+      />
 
       {totalPages > 1 && (
         <div className="mt-4 flex items-center justify-center gap-2">

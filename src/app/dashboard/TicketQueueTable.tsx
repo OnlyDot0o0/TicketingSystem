@@ -16,7 +16,7 @@ export type QueueTicketRow = {
   status: string;
   slaDueAt: Date | string;
   createdAt: Date | string;
-  project: { name: string; accentColorHex: string };
+  project: { id: string; name: string; accentColorHex: string };
   assignedTo: { id: string; name: string } | null;
   tags: { tagId: string; tag: { id: string; name: string; colorHex: string | null } }[];
 };
@@ -28,11 +28,16 @@ export default function TicketQueueTable({
   agents,
   tags,
   currentUserId,
+  categoryLabelMap,
 }: {
   tickets: QueueTicketRow[];
   agents: { id: string; name: string }[];
   tags: { id: string; name: string }[];
   currentUserId: string;
+  // `${projectId}:${categoryKey}` -> label — categories are per-project now
+  // (v6), so each row's label is looked up via its own project id rather
+  // than a single global CATEGORY_LABELS map.
+  categoryLabelMap: Record<string, string>;
 }) {
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [isPending, startTransition] = useTransition();
@@ -224,7 +229,9 @@ export default function TicketQueueTable({
                       ))}
                     </div>
                   </td>
-                  <td className="p-3"><CategoryBadge category={t.category} /></td>
+                  <td className="p-3">
+                    <CategoryBadge category={t.category} label={categoryLabelMap[`${t.project.id}:${t.category}`]} />
+                  </td>
                   <td className="p-3"><PriorityBadge priority={t.priority} /></td>
                   <td className="p-3"><StatusBadge status={t.status} /></td>
                   <td className="p-3">{t.assignedTo?.name || "—"}</td>

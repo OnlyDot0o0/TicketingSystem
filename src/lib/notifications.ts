@@ -1,6 +1,6 @@
 import { prisma } from "./prisma";
 import { sendMail, emailShell } from "./mail";
-import { APP_BASE_URL, CATEGORY_LABELS } from "./config";
+import { APP_BASE_URL } from "./config";
 
 type ProjectRef = { slug: string; name: string };
 
@@ -9,7 +9,11 @@ export async function notifyTicketCreated(
     ticketNumber: string;
     subject: string;
     submitterEmail: string | null;
-    category: string;
+    // Already-resolved display label (categories are per-project now — the
+    // caller resolves the key against that project's own Category list
+    // before calling this, since this function has no project id to look
+    // it up with itself for the submitter-facing email).
+    categoryLabel: string;
   },
   // Needs `id` (unlike the other notify* functions below) to scope the
   // staff notification list to this project's actual members.
@@ -26,7 +30,7 @@ export async function notifyTicketCreated(
         <p>شكرًا لتواصلك معنا. تم فتح تذكرة دعم لمشروع ${project.name}:</p>
         <p style="font-size:20px;font-weight:bold;color:#B5691A;">${ticket.ticketNumber}</p>
         <p><strong>الموضوع:</strong> ${ticket.subject}</p>
-        <p><strong>التصنيف:</strong> ${CATEGORY_LABELS[ticket.category] ?? ticket.category}</p>
+        <p><strong>التصنيف:</strong> ${ticket.categoryLabel}</p>
         <p>يمكنك متابعة حالة التذكرة في أي وقت عبر الرابط التالي، باستخدام رقم التذكرة ورقم جوالك:</p>
         <p><a href="${trackUrl}" style="color:#276661;">${trackUrl}</a></p>
       `,

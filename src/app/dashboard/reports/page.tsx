@@ -1,7 +1,7 @@
 import { redirect } from "next/navigation";
 import { Prisma } from "@prisma/client";
 import { prisma } from "@/lib/prisma";
-import { CATEGORY_LABELS, STATUS_LABELS } from "@/lib/config";
+import { STATUS_LABELS } from "@/lib/config";
 import { StatusPie, CategoryBar, TimeSeriesLine } from "./Charts";
 import { getViewerScope, scopedProjectWhere, ViewerScope } from "@/lib/access";
 import { buildTicketQueueWhere } from "@/lib/ticketQueue";
@@ -112,10 +112,24 @@ export default async function ReportsPage({
     value: statusCounts.get(s) ?? 0,
   }));
 
+  // Categories are per-project now (v6) — there's no longer a single global
+  // category list to build the "by category" breakdown from. When exactly
+  // one project is in view (either explicitly selected, or the viewer only
+  // has access to one project to begin with), that project's own Category
+  // list is well-defined and the breakdown renders exactly like before,
+  // just sourced per-project. When viewing multiple/all projects at once,
+  // different projects' categories can use unrelated (or coincidentally
+  // colliding) keys, so there's no single meaningful axis to chart them on
+  // — deliberately not rendered in that case (see README for the reasoning
+  // this was a judgment call, not an oversight).
   const categoryCounts = new Map(categoryGroups.map((g) => [g.category, g._count._all]));
-  const byCategory = Object.keys(CATEGORY_LABELS).map((c) => ({
-    name: CATEGORY_LABELS[c],
-    value: categoryCounts.get(c) ?? 0,
+  const categoryProject = activeProject || (projects.length === 1 ? projects[0] : undefined);
+  const projectCategories = categoryProject
+    ? await prisma.category.findMany({ where: { projectId: categoryProject.id }, orderBy: { order: "asc" } })
+    : [];
+  const byCategory = projectCategories.map((c) => ({
+    name: c.label,
+    value: categoryCounts.get(c.key) ?? 0,
   }));
 
   const avgResolutionHours = resolutionRow[0]?.avgHours ?? 0;
@@ -162,7 +176,14 @@ export default async function ReportsPage({
         </div>
         <div className="card p-5">
           <h2 className="mb-2 text-sm font-bold">التذاكر حسب التصنيف</h2>
-          <CategoryBar data={byCategory} />
+          {categoryProject ? (
+            <CategoryBar data={byCategory} />
+          ) : (
+            <p className="py-8 text-center text-xs text-ink-soft">
+              التصنيفات أصبحت خاصة بكل مشروع على حدة — اختر مشروعًا محددًا من القائمة أعلاه لعرض توزيع
+              التذاكر حسب تصنيفاته.
+            </p>
+          )}
         </div>
       </div>
 

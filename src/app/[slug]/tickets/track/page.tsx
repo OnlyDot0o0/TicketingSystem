@@ -6,6 +6,7 @@ import { MessageThread, AttachmentChip } from "@/components/MessageThread";
 import ReplyForm from "./ReplyForm";
 import { isOverdue } from "@/lib/sla";
 import { signAttachmentUrl } from "@/lib/attachmentAccess";
+import { categoryLabel } from "@/lib/categories";
 
 export default async function TrackTicketPage({
   params,
@@ -25,6 +26,10 @@ export default async function TrackTicketPage({
     ticket = await lookup(project.id, ticketNumber, phone);
     if (!ticket) notFound = true;
   }
+
+  const categories = ticket
+    ? await prisma.category.findMany({ where: { projectId: project.id }, select: { key: true, label: true } })
+    : [];
 
   return (
     <div className="flex min-h-screen flex-col">
@@ -82,7 +87,7 @@ export default async function TrackTicketPage({
               <div className="flex flex-wrap gap-2">
                 <StatusBadge status={ticket.status} />
                 <PriorityBadge priority={ticket.priority} />
-                <CategoryBadge category={ticket.category} />
+                <CategoryBadge category={ticket.category} label={categoryLabel(categories, ticket.category)} />
                 {isOverdue(ticket.slaDueAt, ticket.status) && (
                   <span className="badge" style={{ borderColor: "#c8322d", color: "#c8322d" }}>
                     متأخرة

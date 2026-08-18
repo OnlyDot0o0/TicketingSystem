@@ -11,10 +11,10 @@ export default async function NewTicketPage({
 }) {
   const project = await getProjectBySlugOr404(params.slug);
   const captcha = getCaptchaConfig();
-  const customFields = await prisma.customField.findMany({
-    where: { projectId: project.id },
-    orderBy: { order: "asc" },
-  });
+  const [customFields, categories] = await Promise.all([
+    prisma.customField.findMany({ where: { projectId: project.id }, orderBy: { order: "asc" } }),
+    prisma.category.findMany({ where: { projectId: project.id }, orderBy: { order: "asc" } }),
+  ]);
 
   return (
     <div className="flex min-h-screen flex-col">
@@ -37,6 +37,7 @@ export default async function NewTicketPage({
             priorityMode: project.priorityMode as never,
             attachmentsMode: project.attachmentsMode as never,
           }}
+          categories={categories.map((c) => ({ key: c.key, label: c.label }))}
           customFields={customFields.map((f) => ({
             id: f.id,
             key: f.key,

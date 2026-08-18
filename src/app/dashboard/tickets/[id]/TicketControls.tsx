@@ -2,15 +2,17 @@
 
 import { useTransition } from "react";
 import { updateTicketAction, assignToMeAction } from "./actions";
-import { CATEGORY_LABELS, PRIORITY_LABELS, STATUS_LABELS } from "@/lib/config";
+import { PRIORITY_LABELS, STATUS_LABELS } from "@/lib/config";
 
 type Agent = { id: string; name: string };
+type CategoryOption = { key: string; label: string };
 
 export default function TicketControls({
   ticketId,
   status,
   priority,
   category,
+  categories,
   assignedToId,
   agents,
   currentUserId,
@@ -19,6 +21,7 @@ export default function TicketControls({
   status: string;
   priority: string;
   category: string;
+  categories: CategoryOption[];
   assignedToId: string | null;
   agents: Agent[];
   currentUserId: string;
@@ -70,8 +73,8 @@ export default function TicketControls({
           disabled={isPending}
           onChange={(e) => submitField("category", e.target.value)}
         >
-          {Object.entries(CATEGORY_LABELS).map(([v, l]) => (
-            <option key={v} value={v}>{l}</option>
+          {categories.map((c) => (
+            <option key={c.key} value={c.key}>{c.label}</option>
           ))}
         </select>
       </div>
