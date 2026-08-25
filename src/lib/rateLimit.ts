@@ -150,4 +150,12 @@ export async function checkRateLimit(key: string, max: number, windowMs: number)
 
 export const TICKET_RATE_LIMIT_PER_PHONE = 5; // per hour
 export const TICKET_RATE_LIMIT_PER_IP = 10; // per hour
+
+// forgot-password had no rate limiting at all, unlike login/TOTP and public
+// ticket creation — same two-bucket shape as the ticket limiter above: a
+// tight per-email cap (stop one inbox from being bombed with reset links)
+// plus a looser per-IP cap (stop one source from sweeping many addresses).
+export const FORGOT_PASSWORD_RATE_LIMIT_PER_EMAIL = 3; // per hour
+export const FORGOT_PASSWORD_RATE_LIMIT_PER_IP = 10; // per hour
+
 export const ONE_HOUR_MS = 60 * 60 * 1000;
