@@ -2,77 +2,56 @@ import Link from "next/link";
 import { signOut } from "@/lib/auth";
 import { ROLE_LABELS } from "@/lib/config";
 import { getViewerScope } from "@/lib/access";
+import { DashboardNav, DashboardNavItem } from "@/components/DashboardNav";
 
 export default async function DashboardLayout({ children }: { children: React.ReactNode }) {
   const scope = await getViewerScope();
 
+  // Built once here (same visibility rules as before) and handed to the
+  // client-side DashboardNav, which renders it two ways: inline on desktop,
+  // behind a hamburger panel on mobile — see DashboardNav.tsx for why.
+  const navItems: DashboardNavItem[] = [{ href: "/dashboard", label: "التذاكر" }];
+  if (scope?.isSuperAdmin) {
+    navItems.push({ href: "/dashboard/roles", label: "الأدوار المخصصة" });
+    navItems.push({ href: "/dashboard/audit", label: "سجل التدقيق" });
+  }
+  if (scope && (scope.isSuperAdmin || scope.permissions.canViewReports)) {
+    navItems.push({ href: "/dashboard/reports", label: "التقارير" });
+  }
+  if (scope && (scope.isSuperAdmin || scope.permissions.canManageTeam)) {
+    navItems.push({ href: "/dashboard/agents", label: "فريق الدعم" });
+  }
+  if (scope && (scope.isSuperAdmin || scope.permissions.canManageCannedResponses)) {
+    navItems.push({ href: "/dashboard/canned-responses", label: "الردود الجاهزة" });
+  }
+  if (scope && (scope.isSuperAdmin || scope.permissions.canManageTicketForm)) {
+    navItems.push({ href: "/dashboard/projects", label: scope.isSuperAdmin ? "المشاريع" : "مشاريعي" });
+  }
+
+  const userLabel = `${scope?.name} (${
+    scope?.role === "CUSTOM" ? scope.customRoleName || ROLE_LABELS.CUSTOM : ROLE_LABELS[scope?.role || ""] || scope?.role
+  })`;
+
+  async function signOutAction() {
+    "use server";
+    await signOut({ redirectTo: "/login" });
+  }
+
   return (
     <div className="min-h-screen bg-bg">
-      <header className="border-b border-border bg-surface">
-        <div className="mx-auto flex max-w-6xl flex-wrap items-center justify-between gap-3 px-4 py-3">
-          <div className="flex items-center gap-6">
-            <Link href="/dashboard" className="text-lg font-bold text-teal">
-              لوحة الدعم
-            </Link>
-            <nav className="flex items-center gap-4 text-sm">
-              <Link href="/dashboard" className="text-ink-soft hover:text-teal">
-                التذاكر
-              </Link>
-              {scope?.isSuperAdmin && (
-                <Link href="/dashboard/roles" className="text-ink-soft hover:text-teal">
-                  الأدوار المخصصة
-                </Link>
-              )}
-              {scope?.isSuperAdmin && (
-                <Link href="/dashboard/audit" className="text-ink-soft hover:text-teal">
-                  سجل التدقيق
-                </Link>
-              )}
-              {scope && (scope.isSuperAdmin || scope.permissions.canViewReports) && (
-                <Link href="/dashboard/reports" className="text-ink-soft hover:text-teal">
-                  التقارير
-                </Link>
-              )}
-              {scope && (scope.isSuperAdmin || scope.permissions.canManageTeam) && (
-                <Link href="/dashboard/agents" className="text-ink-soft hover:text-teal">
-                  فريق الدعم
-                </Link>
-              )}
-              {scope && (scope.isSuperAdmin || scope.permissions.canManageCannedResponses) && (
-                <Link href="/dashboard/canned-responses" className="text-ink-soft hover:text-teal">
-                  الردود الجاهزة
-                </Link>
-              )}
-              {scope && (scope.isSuperAdmin || scope.permissions.canManageTicketForm) && (
-                <Link href="/dashboard/projects" className="text-ink-soft hover:text-teal">
-                  {scope.isSuperAdmin ? "المشاريع" : "مشاريعي"}
-                </Link>
-              )}
-            </nav>
-          </div>
-          <div className="flex items-center gap-3 text-sm">
-            {scope && (
-              <Link href="/dashboard/settings" className="text-ink-soft hover:text-teal">
-                الإعدادات
-              </Link>
-            )}
-            <span className="text-ink-soft">
-              {scope?.name}
-              <span className="mr-1 text-xs">
-                ({scope?.role === "CUSTOM" ? scope.customRoleName || ROLE_LABELS.CUSTOM : ROLE_LABELS[scope?.role || ""] || scope?.role})
-              </span>
-            </span>
-            <form
-              action={async () => {
-                "use server";
-                await signOut({ redirectTo: "/login" });
-              }}
-            >
-              <button type="submit" className="btn btn-outline">
-                تسجيل الخروج
-              </button>
-            </form>
-          </div>
+      <header className="relative border-b border-border bg-surface">
+        <div className="mx-auto flex max-w-6xl items-center justify-between gap-3 px-4 py-3">
+          <Link href="/dashboard" className="text-lg font-bold text-teal">
+            لوحة الدعم
+          </Link>
+          {scope && (
+            <DashboardNav
+              navItems={navItems}
+              settingsHref="/dashboard/settings"
+              userLabel={userLabel}
+              signOutAction={signOutAction}
+            />
+          )}
         </div>
       </header>
       <main className="mx-auto max-w-6xl px-4 py-6">{children}</main>
