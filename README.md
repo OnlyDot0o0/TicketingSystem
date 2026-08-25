@@ -66,6 +66,112 @@ stable schema.
 A slug that doesn't match any `Project` row 404s (via `getProjectBySlugOr404`
 in `src/lib/projects.ts`).
 
+## Database schema
+
+Single shared database (SQLite in dev at `prisma/dev.db`, Postgres in
+production — see ["Path to real production deploy"](#path-to-real-production-deploy)
+below), one schema, everything client-specific scoped by `projectId` rather
+than one database per client (see
+["Scaling"](#scaling-one-shared-database-not-one-per-project)). The full
+schema, with its design-decision comments, lives in
+[`prisma/schema.prisma`](prisma/schema.prisma) — this section is a map to
+read before diving into that file, not a replacement for it.
+
+### Entities at a glance
+
+| Model | Purpose |
+|---|---|
+| `Project` | One client/tenant (e.g. "رقابة+"). Owns branding, ticket-form field config, per-project SLA targets, and its own `ticketPrefix`/`ticketSeq` counter. |
+| `User` | A support-team account (`SUPER_ADMIN`/`ADMIN`/`AGENT`/`CUSTOM`). Submitters are **not** `User` rows — see below. |
+| `CustomRole` | SUPER_ADMIN-defined variant of `ADMIN`/`AGENT` with 4 independently togglable extra permissions. Only meaningful when `User.role === "CUSTOM"`. |
+| `ProjectMembership` | Join table granting an `ADMIN`/`AGENT`/`CUSTOM` user visibility into one `Project`. `SUPER_ADMIN` bypasses it (global, unscoped). |
+| `Ticket` | The core record. Belongs to one `Project`; optionally assigned to one `User`. Submitter identity (`submitterName`/`Phone`/`Email`) is stored directly on the ticket, not a separate account. |
+| `TicketMessage` | One message in a ticket's thread — either from the submitter or a staff reply/internal note (`isInternalNote`). |
+| `Attachment` | A file on a ticket, optionally tied to one `TicketMessage`. Storage location handled by `src/lib/storage.ts` (local disk by default, or S3-compatible). |
+| `TicketActivity` | Auto-logged status/priority/category/assignment/tag changes for one ticket — a plain-string audit trail, not FK'd to the old/new value. |
+| `AdminActivity` | Same idea, for admin-level actions (project/role/membership/agent-account changes) that aren't tied to a single ticket. No FK to its target — a human-readable snapshot instead, since the target row may since have been deleted. |
+| `Category` | A project-defined ticket category (`key` + Arabic `label`, ordered). Replaces what used to be a hardcoded global category list. |
+| `CustomField` / `TicketFieldValue` | Project-defined extra ticket-form fields, and each ticket's stored value for one. `options` (for `SELECT` fields) is a JSON string — SQLite has no native array/JSON column type. |
+| `Tag` / `TicketTag` | Project-scoped labels, many-to-many with `Ticket`. |
+| `CannedResponse` | A reusable reply template scoped to one project. |
+| `PasswordResetToken` | Hashed (never raw), single-use, 1-hour-expiry token for the staff "forgot password" flow. |
+
+### Relationships
+
+```mermaid
+erDiagram
+    Project ||--o{ Ticket : "has"
+    Project ||--o{ ProjectMembership : "has"
+    Project ||--o{ Category : "defines"
+    Project ||--o{ CustomField : "defines"
+    Project ||--o{ CannedResponse : "has"
+    Project ||--o{ Tag : "defines"
+
+    User ||--o{ ProjectMembership : "member via"
+    User ||--o{ Ticket : "assigned to (optional)"
+    User }o--o| CustomRole : "resolves permissions via"
+    User ||--o{ PasswordResetToken : "requests"
+
+    Ticket ||--o{ TicketMessage : "has"
+    Ticket ||--o{ Attachment : "has"
+    Ticket ||--o{ TicketActivity : "logs"
+    Ticket ||--o{ TicketFieldValue : "has"
+    Ticket }o--o{ Tag : "tagged via TicketTag"
+
+    TicketMessage ||--o{ Attachment : "has"
+    CustomField ||--o{ TicketFieldValue : "has"
+```
+
+`AdminActivity` isn't in the diagram — it deliberately has no foreign keys
+(see the model's comment in `prisma/schema.prisma`).
+
+### Modeling decisions worth knowing before you touch this
+
+- **String-enums, not Prisma enums, in the active schema.** SQLite has no
+  native enum type, so `role`, `priority`, `status`, `authorType`, and a
+  handful of others are plain `String` columns with the allowed values
+  enforced in application code (see the header comment block in
+  `prisma/schema.prisma`) rather than at the database level.
+  `prisma/schema.postgres.prisma` is a ready-to-apply reference schema with
+  real Prisma `enum`s for all of these **except** `Ticket.category`, which
+  stays a plain string on purpose even in Postgres — v6 made it hold a
+  project-defined `Category.key` rather than a fixed set of values, so it
+  must never become an enum (see that file's own header for the full
+  reasoning). Don't hand-edit `schema.postgres.prisma` without also updating
+  `schema.prisma`, or the two will drift.
+- **Everything client-specific hangs off `projectId`.** Tickets, categories,
+  custom fields, tags, canned responses, and team membership all carry a
+  `projectId` foreign key with `onDelete: Cascade` — deleting a `Project`
+  cleans up everything under it. There is deliberately **one shared
+  database**, not one per client — see
+  ["Scaling"](#scaling-one-shared-database-not-one-per-project) for why.
+- **Submitters aren't `User` rows.** A ticket's submitter identity lives
+  directly on `Ticket` (`submitterName`/`submitterPhone`/`submitterEmail`).
+  Public tracking (`/{slug}/tickets/track`) authenticates with **ticket
+  number + phone number**, not a password — there's no submitter account to
+  look up.
+- **Composite indexes match real query shapes, not just single columns** —
+  `[projectId, createdAt]`, `[projectId, status]`, `[projectId, slaDueAt]` on
+  `Ticket`, since every dashboard query filters by project first, then
+  filters/sorts by one of these. See
+  ["Scaling"](#scaling-one-shared-database-not-one-per-project) for the
+  reasoning.
+- **Two audit trails, both plain-string snapshots, not FK'd to the changed
+  value.** `TicketActivity` (per-ticket) and `AdminActivity` (admin-level)
+  both store `fromValue`/`toValue` as strings rather than relations —
+  intentional, so the log stays readable even after the referenced role,
+  member, or project is gone.
+
+### Migrations & seeding
+
+Covered in detail under [Running locally](#running-locally) —
+`npx prisma migrate dev` applies the schema, `npm run prisma:seed` loads 3
+demo projects/users/tickets. Migration history (`prisma/migrations/`) is
+committed and should ship as-is; don't regenerate it from scratch against a
+production database. For the SQLite → Postgres move needed before a real
+production deploy, see
+["Path to real production deploy"](#path-to-real-production-deploy).
+
 ## Access control (v2 — project-scoped)
 
 This is the core change in this round. A new `ProjectMembership` join table
