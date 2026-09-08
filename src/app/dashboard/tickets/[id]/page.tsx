@@ -11,12 +11,13 @@ import TagsSection from "./TagsSection";
 import ActivityTimeline from "./ActivityTimeline";
 import CustomFieldsSection from "./CustomFieldsSection";
 
-export default async function TicketDetailPage({ params }: { params: { id: string } }) {
+export default async function TicketDetailPage({ params }: { params: Promise<{ id: string }> }) {
+  const { id } = await params;
   const scope = await getViewerScope();
   if (!scope) redirect("/login");
 
   const ticket = await prisma.ticket.findUnique({
-    where: { id: params.id },
+    where: { id },
     include: {
       messages: { orderBy: { createdAt: "asc" }, include: { attachments: true } },
       attachments: true,

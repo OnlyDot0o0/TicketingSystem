@@ -1,7 +1,8 @@
 "use client";
 
 import Script from "next/script";
-import { useFormState, useFormStatus } from "react-dom";
+import { useActionState } from "react";
+import { useFormStatus } from "react-dom";
 import { createTicketAction, CreateTicketState } from "./actions";
 import { PRIORITY_LABELS } from "@/lib/config";
 import type { TicketFormConfig } from "@/lib/projects";
@@ -99,7 +100,7 @@ export default function NewTicketForm({
   categories: { key: string; label: string }[];
   customFields: CustomFieldConfig[];
 }) {
-  const [state, formAction] = useFormState(createTicketAction.bind(null, slug), initialState);
+  const [state, formAction] = useActionState(createTicketAction.bind(null, slug), initialState);
 
   return (
     <form action={formAction} encType="multipart/form-data" className="card space-y-5 p-6">

@@ -7,9 +7,10 @@ import NewTicketForm from "./NewTicketForm";
 export default async function NewTicketPage({
   params,
 }: {
-  params: { slug: string };
+  params: Promise<{ slug: string }>;
 }) {
-  const project = await getProjectBySlugOr404(params.slug);
+  const { slug } = await params;
+  const project = await getProjectBySlugOr404(slug);
   const captcha = getCaptchaConfig();
   const [customFields, categories] = await Promise.all([
     prisma.customField.findMany({ where: { projectId: project.id }, orderBy: { order: "asc" } }),

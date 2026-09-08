@@ -10,10 +10,11 @@ type SearchParams = TicketQueueFilters & { page?: string };
 const PAGE_SIZE = 25;
 
 export default async function DashboardTicketsPage({
-  searchParams,
+  searchParams: searchParamsPromise,
 }: {
-  searchParams: SearchParams;
+  searchParams: Promise<SearchParams>;
 }) {
+  const searchParams = await searchParamsPromise;
   const scope = await requireScopedViewer();
 
   const where = buildTicketQueueWhere(scope, searchParams);

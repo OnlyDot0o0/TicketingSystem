@@ -23,8 +23,8 @@ const LOGIN_ATTEMPTS_PER_WINDOW = 10;
 // code guesses doesn't also lock the account out of the password step.
 const TOTP_ATTEMPTS_PER_WINDOW = 10;
 
-function clientIp(): string {
-  const h = headers();
+async function clientIp(): Promise<string> {
+  const h = await headers();
   const fwd = h.get("x-forwarded-for");
   if (fwd) return fwd.split(",")[0].trim();
   return h.get("x-real-ip") || "unknown";
@@ -39,7 +39,8 @@ export async function loginAction(
   const totpCode = String(formData.get("totpCode") || "").trim();
   const callbackUrl = String(formData.get("callbackUrl") || "/dashboard");
 
-  const rateLimitKey = `login:${email.trim().toLowerCase()}:${clientIp()}`;
+  const ip = await clientIp();
+  const rateLimitKey = `login:${email.trim().toLowerCase()}:${ip}`;
   if (!(await checkRateLimit(rateLimitKey, LOGIN_ATTEMPTS_PER_WINDOW, ONE_HOUR_MS))) {
     return { error: "تم تجاوز عدد محاولات الدخول المسموح. يرجى المحاولة لاحقًا." };
   }
@@ -47,7 +48,7 @@ export async function loginAction(
   // Only count actual code guesses against the TOTP limiter — the first,
   // password-only submission that reveals "a code is needed" isn't a guess.
   if (totpCode) {
-    const totpRateLimitKey = `totp:${email.trim().toLowerCase()}:${clientIp()}`;
+    const totpRateLimitKey = `totp:${email.trim().toLowerCase()}:${ip}`;
     if (!(await checkRateLimit(totpRateLimitKey, TOTP_ATTEMPTS_PER_WINDOW, ONE_HOUR_MS))) {
       return { needsTotp: true, error: "تم تجاوز عدد محاولات إدخال رمز التحقق. يرجى المحاولة لاحقًا." };
     }

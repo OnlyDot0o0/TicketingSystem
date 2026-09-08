@@ -1,7 +1,8 @@
 "use client";
 
 import { useState, useTransition } from "react";
-import { useFormState, useFormStatus } from "react-dom";
+import { useActionState } from "react";
+import { useFormStatus } from "react-dom";
 import {
   createCustomFieldAction,
   updateCustomFieldAction,
@@ -34,7 +35,7 @@ function SubmitButton({ label }: { label: string }) {
 }
 
 function AddFieldForm({ projectId }: { projectId: string }) {
-  const [state, formAction] = useFormState(createCustomFieldAction, initialState);
+  const [state, formAction] = useActionState(createCustomFieldAction, initialState);
   const [fieldType, setFieldType] = useState("TEXT");
 
   return (
@@ -87,7 +88,7 @@ function AddFieldForm({ projectId }: { projectId: string }) {
 function FieldRow({ field, isFirst, isLast }: { field: CustomFieldData; isFirst: boolean; isLast: boolean }) {
   const [editing, setEditing] = useState(false);
   const [isPending, startTransition] = useTransition();
-  const [state, formAction] = useFormState(updateCustomFieldAction, initialState);
+  const [state, formAction] = useActionState(updateCustomFieldAction, initialState);
   const options = parseOptions(field.options);
 
   if (editing) {

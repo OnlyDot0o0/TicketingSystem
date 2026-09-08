@@ -14,8 +14,8 @@ import {
 
 export type ForgotPasswordState = { submitted?: boolean; error?: string };
 
-function clientIp(): string {
-  const h = headers();
+async function clientIp(): Promise<string> {
+  const h = await headers();
   const fwd = h.get("x-forwarded-for");
   if (fwd) return fwd.split(",")[0].trim();
   return h.get("x-real-ip") || "unknown";
@@ -28,7 +28,7 @@ export async function forgotPasswordAction(
   const email = String(formData.get("email") || "").trim().toLowerCase();
   if (!email) return { error: "يرجى إدخال البريد الإلكتروني." };
 
-  const ip = clientIp();
+  const ip = await clientIp();
   if (!(await checkRateLimit(`forgot-password-email:${email}`, FORGOT_PASSWORD_RATE_LIMIT_PER_EMAIL, ONE_HOUR_MS))) {
     return { error: "تم تجاوز عدد الطلبات المسموح لهذا البريد. يرجى المحاولة لاحقًا." };
   }

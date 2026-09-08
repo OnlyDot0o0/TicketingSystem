@@ -12,12 +12,14 @@ export default async function TrackTicketPage({
   params,
   searchParams,
 }: {
-  params: { slug: string };
-  searchParams: { ticketNumber?: string; phone?: string };
+  params: Promise<{ slug: string }>;
+  searchParams: Promise<{ ticketNumber?: string; phone?: string }>;
 }) {
-  const project = await getProjectBySlugOr404(params.slug);
-  const ticketNumber = searchParams.ticketNumber?.trim();
-  const phone = searchParams.phone?.trim();
+  const { slug } = await params;
+  const project = await getProjectBySlugOr404(slug);
+  const resolvedSearchParams = await searchParams;
+  const ticketNumber = resolvedSearchParams.ticketNumber?.trim();
+  const phone = resolvedSearchParams.phone?.trim();
 
   let ticket: Awaited<ReturnType<typeof lookup>> = null;
   let notFound = false;

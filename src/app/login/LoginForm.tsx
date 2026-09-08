@@ -1,7 +1,8 @@
 "use client";
 
 import Link from "next/link";
-import { useFormState, useFormStatus } from "react-dom";
+import { useActionState } from "react";
+import { useFormStatus } from "react-dom";
 import { loginAction, LoginState } from "./actions";
 
 const initialState: LoginState = {};
@@ -16,7 +17,7 @@ function SubmitButton() {
 }
 
 export default function LoginForm({ callbackUrl }: { callbackUrl: string }) {
-  const [state, formAction] = useFormState(loginAction, initialState);
+  const [state, formAction] = useActionState(loginAction, initialState);
 
   return (
     <form action={formAction} className="card space-y-4 p-6">

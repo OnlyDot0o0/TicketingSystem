@@ -106,6 +106,39 @@ export async function notifyAgentReply(
   });
 }
 
+export async function notifySubmitterReply(
+  ticket: {
+    ticketNumber: string;
+    subject: string;
+    // Recipient rule matches notifySlaWarning below: the assigned agent if
+    // present, otherwise every project member who can see the ticket (via
+    // projectStaffEmails) — an unassigned ticket has no single "owner" to
+    // notify, so it goes to the whole visible team instead.
+    assignedTo: { email: string } | null;
+  },
+  // Needs `id`, same reason as notifySlaWarning below: to scope the
+  // fallback staff notification list to this project's actual members.
+  project: ProjectRef & { id: string }
+) {
+  const ticketUrl = `${APP_BASE_URL}/dashboard`;
+  const subject = `رد جديد من مقدّم الطلب على ${ticket.ticketNumber}`;
+  const html = emailShell(
+    `
+    <p>أضاف مقدّم الطلب ردًا جديدًا على تذكرة دعم لمشروع ${project.name}:</p>
+    <p style="font-size:20px;font-weight:bold;color:#B5691A;">${ticket.ticketNumber}</p>
+    <p><strong>الموضوع:</strong> ${ticket.subject}</p>
+    <p><a href="${ticketUrl}" style="color:#276661;">فتح لوحة التحكم</a></p>
+  `,
+    project.name
+  );
+  // Same pattern as notifySlaWarning/notifyResolved: a plain-text fallback
+  // so the no-SMTP console-log path prints something actually useful.
+  const text = `رد جديد من مقدّم الطلب على ${ticket.ticketNumber} — ${ticket.subject}\nلوحة التحكم: ${ticketUrl}`;
+
+  const recipients = ticket.assignedTo ? [ticket.assignedTo.email] : await projectStaffEmails(project.id);
+  await Promise.all(recipients.map((email) => sendMail({ to: email, subject, html, text })));
+}
+
 export async function notifyResolved(
   // `id` (unlike the other notify* functions above) so we can build the
   // public one-click CSAT rating links (/csat/[ticketId]?rating=N). Ticket

@@ -1,12 +1,12 @@
 import Link from "next/link";
 import ResetPasswordForm from "./ResetPasswordForm";
 
-export default function ResetPasswordPage({
+export default async function ResetPasswordPage({
   searchParams,
 }: {
-  searchParams: { token?: string };
+  searchParams: Promise<{ token?: string }>;
 }) {
-  const token = searchParams.token || "";
+  const token = (await searchParams).token || "";
 
   return (
     <div className="flex min-h-screen flex-col items-center justify-center bg-bg px-4">

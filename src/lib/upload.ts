@@ -20,6 +20,30 @@ export function assertValidUpload(file: { type: string; size: number }) {
   }
 }
 
+// file.type is just what the browser/client claims in the multipart
+// request — never otherwise verified against the actual bytes. Without
+// this, an attacker could upload arbitrary content (e.g. an HTML/SVG/JS
+// payload) declared as "image/png": assertValidUpload() above only checks
+// the claimed string, and src/app/api/uploads/[...path]/route.ts later
+// serves the file back with Content-Type set from that same unverified
+// claim and Content-Disposition: inline. Checking the real file signature
+// closes that at the source instead of only trusting the label.
+const SIGNATURE_CHECKS: Record<string, (buf: Buffer) => boolean> = {
+  "image/png": (buf) =>
+    buf.length >= 8 && buf.subarray(0, 8).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a])),
+  "image/jpeg": (buf) => buf.length >= 3 && buf[0] === 0xff && buf[1] === 0xd8 && buf[2] === 0xff,
+  "image/webp": (buf) =>
+    buf.length >= 12 && buf.subarray(0, 4).toString("ascii") === "RIFF" && buf.subarray(8, 12).toString("ascii") === "WEBP",
+  "application/pdf": (buf) => buf.length >= 5 && buf.subarray(0, 5).toString("ascii") === "%PDF-",
+};
+
+export function assertMatchesSignature(mimeType: string, buffer: Buffer) {
+  const check = SIGNATURE_CHECKS[mimeType];
+  if (!check || !check(buffer)) {
+    throw new UploadValidationError("محتوى الملف لا يطابق نوعه المعلن.");
+  }
+}
+
 export async function saveUploadedFile(ticketId: string, file: File): Promise<{
   filename: string;
   storedPath: string;
@@ -36,6 +60,7 @@ export async function saveUploadedFile(ticketId: string, file: File): Promise<{
   const storedPath = `${ticketId}/${safeName}`;
 
   const buffer = Buffer.from(await file.arrayBuffer());
+  assertMatchesSignature(file.type, buffer);
   await getStorage().save(storedPath, buffer, file.type);
 
   return {

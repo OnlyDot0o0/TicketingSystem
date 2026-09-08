@@ -18,9 +18,10 @@ import { verifyAttachmentToken } from "@/lib/attachmentAccess";
 // saved there but never servable) if it hadn't been updated too.
 export async function GET(
   req: NextRequest,
-  { params }: { params: { path: string[] } }
+  { params }: { params: Promise<{ path: string[] }> }
 ) {
-  const relPath = params.path.join("/");
+  const { path } = await params;
+  const relPath = path.join("/");
 
   try {
     // Storage-agnostic traversal check — an S3 key has no filesystem to
@@ -83,6 +84,12 @@ export async function GET(
         // UTF-8 bytes in a quoted Content-Disposition filename.
         "Content-Disposition": `inline; filename*=UTF-8''${encodeURIComponent(attachment.filename)}`,
         "Cache-Control": "private, max-age=3600",
+        // Defense-in-depth alongside the upload-time signature check in
+        // src/lib/upload.ts: even if a stored file's bytes ever end up not
+        // matching its declared Content-Type, this stops a browser from
+        // sniffing the body and rendering it as something else (e.g. HTML)
+        // regardless of the header above.
+        "X-Content-Type-Options": "nosniff",
         // This response's authorization depends on the request's session
         // cookie (or signed token). Without Vary, a browser's private
         // cache would key purely on URL — on a SHARED device, one staff

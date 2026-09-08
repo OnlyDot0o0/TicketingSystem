@@ -27,7 +27,7 @@ const TARGET_TYPE_LABELS: Record<string, string> = {
   AGENT: "حساب موظف",
 };
 
-const MAX_ROWS = 200;
+const PAGE_SIZE = 50;
 
 function fmtDate(d: Date) {
   return new Date(d).toLocaleString("ar-SA", { dateStyle: "medium", timeStyle: "short" });
@@ -36,19 +36,36 @@ function fmtDate(d: Date) {
 export default async function AuditPage({
   searchParams,
 }: {
-  searchParams: { action?: string };
+  searchParams: Promise<{ action?: string; page?: string }>;
 }) {
   const scope = await getViewerScope();
   if (!scope) redirect("/login");
   if (!scope.isSuperAdmin) redirect("/dashboard");
 
-  const action = searchParams.action || undefined;
+  const resolvedSearchParams = await searchParams;
+  const action = resolvedSearchParams.action || undefined;
+  const where = action ? { action } : undefined;
+  const page = Math.max(1, parseInt(resolvedSearchParams.page || "1", 10) || 1);
 
-  const activities = await prisma.adminActivity.findMany({
-    where: action ? { action } : undefined,
-    orderBy: { createdAt: "desc" },
-    take: MAX_ROWS,
-  });
+  // Real pagination (was a flat 200-row cap with no way to see past it) —
+  // same skip/take + count() shape as the ticket queue (src/app/dashboard/page.tsx).
+  const [total, activities] = await Promise.all([
+    prisma.adminActivity.count({ where }),
+    prisma.adminActivity.findMany({
+      where,
+      orderBy: { createdAt: "desc" },
+      skip: (page - 1) * PAGE_SIZE,
+      take: PAGE_SIZE,
+    }),
+  ]);
+  const totalPages = Math.max(1, Math.ceil(total / PAGE_SIZE));
+
+  const pageHref = (p: number) => {
+    const params = new URLSearchParams();
+    if (action) params.set("action", action);
+    params.set("page", String(p));
+    return `/dashboard/audit?${params.toString()}`;
+  };
 
   return (
     <div className="space-y-6">
@@ -56,7 +73,7 @@ export default async function AuditPage({
         <h1 className="text-xl font-extrabold text-teal">سجل التدقيق</h1>
         <p className="mt-1 text-sm text-ink-soft">
           سجل الإجراءات الإدارية (المشاريع، الأدوار المخصصة، فريق الدعم) — للمدير العام فقط.
-          يعرض آخر {MAX_ROWS} إجراء، الأحدث أولًا.
+          {total} إجراء، الأحدث أولًا{totalPages > 1 ? ` — صفحة ${page} من ${totalPages}` : ""}.
         </p>
       </div>
 
@@ -119,6 +136,26 @@ export default async function AuditPage({
           </tbody>
         </table>
       </div>
+
+      {totalPages > 1 && (
+        <div className="flex items-center justify-center gap-2">
+          <Link
+            href={pageHref(Math.max(1, page - 1))}
+            aria-disabled={page <= 1}
+            className={`btn btn-outline ${page <= 1 ? "pointer-events-none opacity-40" : ""}`}
+          >
+            السابق
+          </Link>
+          <span className="text-sm text-ink-soft">صفحة {page} من {totalPages}</span>
+          <Link
+            href={pageHref(Math.min(totalPages, page + 1))}
+            aria-disabled={page >= totalPages}
+            className={`btn btn-outline ${page >= totalPages ? "pointer-events-none opacity-40" : ""}`}
+          >
+            التالي
+          </Link>
+        </div>
+      )}
     </div>
   );
 }

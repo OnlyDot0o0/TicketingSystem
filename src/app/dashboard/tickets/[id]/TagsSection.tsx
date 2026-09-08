@@ -1,7 +1,8 @@
 "use client";
 
 import { useTransition, useState } from "react";
-import { useFormState, useFormStatus } from "react-dom";
+import { useActionState } from "react";
+import { useFormStatus } from "react-dom";
 import { addExistingTagAction, removeTagAction, createAndAddTagAction, TagFormState } from "./actions";
 
 type Tag = { id: string; name: string; colorHex: string | null };
@@ -28,7 +29,7 @@ export default function TagsSection({
 }) {
   const [isPending, startTransition] = useTransition();
   const [creating, setCreating] = useState(false);
-  const [state, formAction] = useFormState(createAndAddTagAction, initialState);
+  const [state, formAction] = useActionState(createAndAddTagAction, initialState);
 
   const currentIds = new Set(currentTags.map((t) => t.id));
   const available = projectTags.filter((t) => !currentIds.has(t.id));

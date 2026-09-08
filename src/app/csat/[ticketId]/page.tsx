@@ -18,16 +18,19 @@ export default async function CsatPage({
   params,
   searchParams,
 }: {
-  params: { ticketId: string };
-  searchParams: { rating?: string };
+  params: Promise<{ ticketId: string }>;
+  searchParams: Promise<{ rating?: string }>;
 }) {
+  const { ticketId } = await params;
+  const { rating } = await searchParams;
+
   const ticket = await prisma.ticket.findUnique({
-    where: { id: params.ticketId },
+    where: { id: ticketId },
     include: { project: true },
   });
   if (!ticket) notFound();
 
-  const requestedRating = parseCsatRatingParam(searchParams.rating);
+  const requestedRating = parseCsatRatingParam(rating);
   const { rating: currentRatingResolved, shouldRecord } = resolveCsatRating(ticket.satisfactionRating, requestedRating);
 
   let currentRating = currentRatingResolved;

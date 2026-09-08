@@ -76,7 +76,17 @@ export default async function AgentsPage() {
                 viewerCanAssignRoles={viewerCanAssignRoles}
                 viewerIsSuperAdmin={scope.isSuperAdmin}
                 customRoles={customRoles.map((r) => ({ id: r.id, name: r.name }))}
-                projectNames={u.memberships.map((m) => m.project.name)}
+                // Only reveal project names the VIEWER can also see — a
+                // shared user's membership in a project the viewing ADMIN
+                // has no access to is not this viewer's business, even as
+                // just a name badge with no ticket data attached.
+                projectNames={
+                  scope.isSuperAdmin
+                    ? u.memberships.map((m) => m.project.name)
+                    : u.memberships
+                        .filter((m) => (scope.projectIds || []).includes(m.projectId))
+                        .map((m) => m.project.name)
+                }
               />
             ))}
           </tbody>

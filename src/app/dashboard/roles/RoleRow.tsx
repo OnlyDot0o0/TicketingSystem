@@ -1,7 +1,8 @@
 "use client";
 
 import { useState, useTransition } from "react";
-import { useFormState, useFormStatus } from "react-dom";
+import { useActionState } from "react";
+import { useFormStatus } from "react-dom";
 import { updateCustomRoleAction, deleteCustomRoleAction, RoleFormState } from "./actions";
 import { ROLE_LABELS, PERMISSION_LABELS } from "@/lib/config";
 
@@ -39,7 +40,7 @@ export default function RoleRow({
   const [editing, setEditing] = useState(false);
   const [isPending, startTransition] = useTransition();
   const [deleteError, setDeleteError] = useState<string | null>(null);
-  const [state, formAction] = useFormState(updateCustomRoleAction, initialState);
+  const [state, formAction] = useActionState(updateCustomRoleAction, initialState);
 
   const permissions: Record<string, boolean> = { canManageTeam, canManageTicketForm, canViewReports, canManageCannedResponses };
 

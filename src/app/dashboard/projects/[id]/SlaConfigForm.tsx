@@ -1,6 +1,7 @@
 "use client";
 
-import { useFormState, useFormStatus } from "react-dom";
+import { useActionState } from "react";
+import { useFormStatus } from "react-dom";
 import { updateSlaConfigAction, ProjectFormState } from "../actions";
 
 const initialState: ProjectFormState = {};
@@ -39,7 +40,7 @@ export default function SlaConfigForm({
   slaMediumDays: number;
   slaLowDays: number;
 }) {
-  const [state, formAction] = useFormState(updateSlaConfigAction, initialState);
+  const [state, formAction] = useActionState(updateSlaConfigAction, initialState);
 
   return (
     <form action={formAction} className="space-y-3">

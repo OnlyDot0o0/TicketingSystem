@@ -1,7 +1,8 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
-import { useFormState, useFormStatus } from "react-dom";
+import { useActionState } from "react";
+import { useFormStatus } from "react-dom";
 import { updateCustomFieldValueAction, CustomFieldValueState } from "./actions";
 import { CUSTOM_FIELD_TYPE_LABELS } from "@/lib/config";
 import { parseOptions } from "@/lib/customFields";
@@ -33,7 +34,7 @@ function displayValue(field: FieldWithValue): string {
 }
 
 function FieldValueEditor({ ticketId, field, onDone }: { ticketId: string; field: FieldWithValue; onDone: () => void }) {
-  const [state, formAction] = useFormState(updateCustomFieldValueAction, initialState);
+  const [state, formAction] = useActionState(updateCustomFieldValueAction, initialState);
   const options = parseOptions(field.options);
   const submittedRef = useRef(false);
 

@@ -6,11 +6,12 @@ export default async function TicketSuccessPage({
   params,
   searchParams,
 }: {
-  params: { slug: string };
-  searchParams: { ticket?: string };
+  params: Promise<{ slug: string }>;
+  searchParams: Promise<{ ticket?: string }>;
 }) {
-  const project = await getProjectBySlugOr404(params.slug);
-  const ticket = searchParams.ticket;
+  const { slug } = await params;
+  const project = await getProjectBySlugOr404(slug);
+  const ticket = (await searchParams).ticket;
 
   return (
     <div className="flex min-h-screen flex-col">

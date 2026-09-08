@@ -2,7 +2,7 @@
 
 import { prisma } from "@/lib/prisma";
 import { auth } from "@/lib/auth";
-import { getViewerScope, canAccessProject } from "@/lib/access";
+import { getViewerScope, canAccessProject, canAssignUserToProject } from "@/lib/access";
 import { saveUploadedFile, UploadValidationError } from "@/lib/upload";
 import { notifyAgentReply, notifyResolved } from "@/lib/notifications";
 import { STATUS_LABELS, PRIORITY_LABELS } from "@/lib/config";
@@ -152,7 +152,15 @@ export async function updateTicketAction(formData: FormData) {
       });
     }
   }
-  if (assignedToRaw !== null && assignedToRaw !== (ticket.assignedToId || "")) {
+  if (
+    assignedToRaw !== null &&
+    assignedToRaw !== (ticket.assignedToId || "") &&
+    // Reject assigning to a user with no ProjectMembership on this ticket's
+    // project (or SUPER_ADMIN) — the assignee dropdown is already scoped to
+    // valid candidates client-side, but a spoofed id must still be rejected
+    // server-side here, same as every other field on this action.
+    (assignedToRaw === "" || (await canAssignUserToProject(assignedToRaw, ticket.projectId)))
+  ) {
     data.assignedToId = assignedToRaw === "" ? null : assignedToRaw;
     const [fromUser, toUser] = await Promise.all([
       ticket.assignedToId ? prisma.user.findUnique({ where: { id: ticket.assignedToId } }) : null,

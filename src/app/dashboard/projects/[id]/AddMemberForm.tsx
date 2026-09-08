@@ -1,6 +1,7 @@
 "use client";
 
-import { useFormState, useFormStatus } from "react-dom";
+import { useActionState } from "react";
+import { useFormStatus } from "react-dom";
 import { addProjectMemberAction, MembershipFormState } from "../actions";
 import { ROLE_LABELS } from "@/lib/config";
 
@@ -22,7 +23,7 @@ export default function AddMemberForm({
   projectId: string;
   candidateUsers: { id: string; name: string; email: string; role: string }[];
 }) {
-  const [state, formAction] = useFormState(addProjectMemberAction, initialState);
+  const [state, formAction] = useActionState(addProjectMemberAction, initialState);
 
   if (candidateUsers.length === 0) {
     return <p className="text-xs text-ink-soft">جميع المستخدمين النشطين أعضاء في هذا المشروع بالفعل.</p>;

@@ -90,6 +90,33 @@ describe("bulkAssignAction", () => {
     expect(refetchedOwn.assignedToId).toBe(agent.id);
     expect(refetchedForeign.assignedToId).toBeNull();
   });
+
+  it("never assigns a ticket to a target user with no membership on that ticket's project, even though the VIEWER does have access", async () => {
+    const { accessibleProject } = await agentScopedToOneProject();
+    const ownTicket = await createTicket(accessibleProject.id, { assignedToId: null });
+    // The target has no relationship to accessibleProject at all — a
+    // spoofed/stale assignee id in the request must not be trusted just
+    // because the acting viewer's own access checked out.
+    const outsider = await createUser({ role: "AGENT", name: "Outsider" });
+
+    const result = await bulkAssignAction([ownTicket.id], outsider.id);
+
+    expect(result.updated).toBe(0);
+    expect(result.skipped).toBe(1);
+    const refetched = await prisma.ticket.findUniqueOrThrow({ where: { id: ownTicket.id } });
+    expect(refetched.assignedToId).toBeNull();
+  });
+
+  it("unassigning (empty target) is always allowed regardless of membership", async () => {
+    const { accessibleProject, agent } = await agentScopedToOneProject();
+    const ownTicket = await createTicket(accessibleProject.id, { assignedToId: agent.id });
+
+    const result = await bulkAssignAction([ownTicket.id], "");
+
+    expect(result.updated).toBe(1);
+    const refetched = await prisma.ticket.findUniqueOrThrow({ where: { id: ownTicket.id } });
+    expect(refetched.assignedToId).toBeNull();
+  });
 });
 
 describe("bulkAddTagAction", () => {

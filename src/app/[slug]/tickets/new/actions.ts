@@ -19,8 +19,8 @@ const PRIORITIES: PriorityLevel[] = ["LOW", "MEDIUM", "HIGH", "URGENT"];
 
 const DEFAULT_PRIORITY: PriorityLevel = "MEDIUM";
 
-function clientIp(): string {
-  const h = headers();
+async function clientIp(): Promise<string> {
+  const h = await headers();
   const fwd = h.get("x-forwarded-for");
   if (fwd) return fwd.split(",")[0].trim();
   return h.get("x-real-ip") || "unknown";
@@ -61,7 +61,7 @@ export async function createTicketAction(
   }
 
   // --- Rate limiting (in-memory, single-instance — see src/lib/rateLimit.ts).
-  const ip = clientIp();
+  const ip = await clientIp();
   if (!(await checkRateLimit(`phone:${submitterPhone}`, TICKET_RATE_LIMIT_PER_PHONE, ONE_HOUR_MS))) {
     return { error: "تم تجاوز الحد المسموح لعدد التذاكر من نفس رقم الجوال. يرجى المحاولة لاحقًا." };
   }

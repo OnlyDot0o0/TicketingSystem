@@ -2,7 +2,8 @@
 
 import { useState } from "react";
 import Link from "next/link";
-import { useFormState, useFormStatus } from "react-dom";
+import { useActionState } from "react";
+import { useFormStatus } from "react-dom";
 import { updateProjectAction, ProjectFormState } from "./actions";
 
 const initialState: ProjectFormState = {};
@@ -34,7 +35,7 @@ export default function ProjectRow({
   ticketCount: number;
 }) {
   const [editing, setEditing] = useState(false);
-  const [state, formAction] = useFormState(updateProjectAction, initialState);
+  const [state, formAction] = useActionState(updateProjectAction, initialState);
 
   if (editing) {
     return (

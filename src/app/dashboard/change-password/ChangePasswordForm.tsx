@@ -1,7 +1,8 @@
 "use client";
 
 import Link from "next/link";
-import { useFormState, useFormStatus } from "react-dom";
+import { useActionState } from "react";
+import { useFormStatus } from "react-dom";
 import { changePasswordAction, ChangePasswordState } from "./actions";
 
 const initialState: ChangePasswordState = {};
@@ -16,7 +17,7 @@ function SubmitButton() {
 }
 
 export default function ChangePasswordForm() {
-  const [state, formAction] = useFormState(changePasswordAction, initialState);
+  const [state, formAction] = useActionState(changePasswordAction, initialState);
 
   if (state?.success) {
     return (

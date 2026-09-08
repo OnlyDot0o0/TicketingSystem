@@ -1,7 +1,8 @@
 "use client";
 
 import { useRef } from "react";
-import { useFormState, useFormStatus } from "react-dom";
+import { useActionState } from "react";
+import { useFormStatus } from "react-dom";
 import { agentReplyAction, AgentReplyState } from "./actions";
 
 const initialState: AgentReplyState = {};
@@ -24,7 +25,7 @@ export default function AgentReplyForm({
   ticketId: string;
   cannedResponses: CannedResponse[];
 }) {
-  const [state, formAction] = useFormState(agentReplyAction, initialState);
+  const [state, formAction] = useActionState(agentReplyAction, initialState);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
 
   function insertCanned(id: string) {

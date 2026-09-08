@@ -22,7 +22,7 @@
 
 import { prisma } from "@/lib/prisma";
 import { auth } from "@/lib/auth";
-import { getViewerScope, canAccessProject, ViewerScope } from "@/lib/access";
+import { getViewerScope, canAccessProject, canAssignUserToProject, ViewerScope } from "@/lib/access";
 import { notifyResolved } from "@/lib/notifications";
 import { STATUS_LABELS } from "@/lib/config";
 import { revalidatePath } from "next/cache";
@@ -99,9 +99,26 @@ export async function bulkAssignAction(ticketIds: string[], assignedToId: string
   const { scope, tickets, skippedForAccess } = await loadAccessibleTickets(ticketIds);
   if (!scope) return { updated: 0, skipped: ticketIds.length, error: "غير مصرح." };
 
+  // Selected tickets can span multiple projects, all being assigned to the
+  // same target user in one batch — the target may have ProjectMembership
+  // on some of those projects but not others, so this has to be checked per
+  // project (never trust the client just because the dropdown was already
+  // scoped), cached here so a large batch doesn't re-query the same project
+  // repeatedly.
+  const membershipCache = new Map<string, boolean>();
+  async function targetCanBeAssigned(projectId: string): Promise<boolean> {
+    if (!normalizedAssignee) return true; // unassigning is always allowed
+    const cached = membershipCache.get(projectId);
+    if (cached !== undefined) return cached;
+    const ok = await canAssignUserToProject(normalizedAssignee, projectId);
+    membershipCache.set(projectId, ok);
+    return ok;
+  }
+
   let updated = 0;
   for (const ticket of tickets) {
     if ((ticket.assignedToId || "") === (normalizedAssignee || "")) continue;
+    if (!(await targetCanBeAssigned(ticket.projectId))) continue;
     const fromUser = ticket.assignedToId
       ? await prisma.user.findUnique({ where: { id: ticket.assignedToId } })
       : null;

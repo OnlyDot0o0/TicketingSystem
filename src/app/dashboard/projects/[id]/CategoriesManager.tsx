@@ -1,7 +1,8 @@
 "use client";
 
 import { useState, useTransition } from "react";
-import { useFormState, useFormStatus } from "react-dom";
+import { useActionState } from "react";
+import { useFormStatus } from "react-dom";
 import {
   createCategoryAction,
   updateCategoryAction,
@@ -29,7 +30,7 @@ function SubmitButton({ label }: { label: string }) {
 }
 
 function AddCategoryForm({ projectId }: { projectId: string }) {
-  const [state, formAction] = useFormState(createCategoryAction, initialState);
+  const [state, formAction] = useActionState(createCategoryAction, initialState);
 
   return (
     <form action={formAction} className="card space-y-3 bg-bg p-4">
@@ -54,7 +55,7 @@ function CategoryRow({ category, isFirst, isLast }: { category: CategoryData; is
   const [editing, setEditing] = useState(false);
   const [isPending, startTransition] = useTransition();
   const [deleteError, setDeleteError] = useState<string | null>(null);
-  const [state, formAction] = useFormState(updateCategoryAction, initialState);
+  const [state, formAction] = useActionState(updateCategoryAction, initialState);
 
   if (editing) {
     return (

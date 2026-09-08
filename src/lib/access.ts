@@ -194,3 +194,22 @@ export async function requirePermission(permission: keyof EffectivePermissions):
 export function hasPermission(scope: ViewerScope, permission: keyof EffectivePermissions): boolean {
   return scope.isSuperAdmin || scope.permissions[permission];
 }
+
+// Whether a given user (by id) may be assigned a ticket in the given
+// project — SUPER_ADMIN can be assigned anywhere (bypasses
+// ProjectMembership like everywhere else), everyone else needs a real
+// ProjectMembership row for that specific project. Used by
+// updateTicketAction and bulkAssignAction before writing Ticket.assignedToId
+// — without this, a ticket could be assigned to someone with no membership
+// on that project at all, who would then start showing up in "my tickets"
+// and receiving SLA-warning / notification emails containing that project's
+// ticket details despite having no dashboard access to it.
+export async function canAssignUserToProject(userId: string, projectId: string): Promise<boolean> {
+  const user = await prisma.user.findUnique({ where: { id: userId }, select: { role: true, active: true } });
+  if (!user || !user.active) return false;
+  if (user.role === "SUPER_ADMIN") return true;
+  const membership = await prisma.projectMembership.findUnique({
+    where: { userId_projectId: { userId, projectId } },
+  });
+  return !!membership;
+}

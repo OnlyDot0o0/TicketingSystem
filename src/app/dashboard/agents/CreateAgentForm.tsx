@@ -1,6 +1,7 @@
 "use client";
 
-import { useFormState, useFormStatus } from "react-dom";
+import { useActionState } from "react";
+import { useFormStatus } from "react-dom";
 import { createAgentAction, CreateAgentState } from "./actions";
 import { ROLE_LABELS } from "@/lib/config";
 
@@ -24,7 +25,7 @@ export default function CreateAgentForm({
   customRoles: { id: string; name: string }[];
   assignableProjects: { id: string; name: string }[];
 }) {
-  const [state, formAction] = useFormState(createAgentAction, initialState);
+  const [state, formAction] = useActionState(createAgentAction, initialState);
   const builtInOptions = isSuperAdmin ? ["AGENT", "ADMIN", "SUPER_ADMIN"] : ["AGENT", "ADMIN"];
 
   return (

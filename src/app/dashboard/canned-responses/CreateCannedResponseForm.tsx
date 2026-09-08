@@ -1,6 +1,7 @@
 "use client";
 
-import { useFormState, useFormStatus } from "react-dom";
+import { useActionState } from "react";
+import { useFormStatus } from "react-dom";
 import { createCannedResponseAction, CannedFormState } from "./actions";
 
 const initialState: CannedFormState = {};
@@ -15,7 +16,7 @@ function SubmitButton() {
 }
 
 export default function CreateCannedResponseForm({ projects }: { projects: { id: string; name: string }[] }) {
-  const [state, formAction] = useFormState(createCannedResponseAction, initialState);
+  const [state, formAction] = useActionState(createCannedResponseAction, initialState);
 
   return (
     <form action={formAction} className="card space-y-3 p-5">

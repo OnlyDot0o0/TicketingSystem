@@ -1,7 +1,8 @@
 "use client";
 
 import Link from "next/link";
-import { useFormState, useFormStatus } from "react-dom";
+import { useActionState } from "react";
+import { useFormStatus } from "react-dom";
 import { resetPasswordAction, ResetPasswordState } from "./actions";
 
 const initialState: ResetPasswordState = {};
@@ -16,7 +17,7 @@ function SubmitButton() {
 }
 
 export default function ResetPasswordForm({ token }: { token: string }) {
-  const [state, formAction] = useFormState(resetPasswordAction, initialState);
+  const [state, formAction] = useActionState(resetPasswordAction, initialState);
 
   if (state?.success) {
     return (

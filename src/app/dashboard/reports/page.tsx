@@ -33,7 +33,7 @@ function projectFilterToSql(filter: undefined | string | { in: string[] }): Pris
 export default async function ReportsPage({
   searchParams,
 }: {
-  searchParams: { projectId?: string };
+  searchParams: Promise<{ projectId?: string }>;
 }) {
   const scope = await getViewerScope();
   if (!scope) redirect("/login");
@@ -48,7 +48,7 @@ export default async function ReportsPage({
     where: scope.isSuperAdmin ? undefined : { id: { in: scope.projectIds || [] } },
     orderBy: { name: "asc" },
   });
-  const projectId = searchParams.projectId || "";
+  const projectId = (await searchParams).projectId || "";
   const activeProject = projectId ? projects.find((p) => p.id === projectId) : undefined;
 
   // Validates the requested projectId is actually accessible (404s

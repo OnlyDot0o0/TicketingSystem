@@ -2,17 +2,14 @@ const { withSentryConfig } = require("@sentry/nextjs");
 
 /** @type {import('next').NextConfig} */
 const nextConfig = {
-  eslint: {
-    ignoreDuringBuilds: true,
-  },
-  // src/instrumentation.ts (the SLA-warning background scheduler's entry
-  // point) is only picked up with this flag on the installed Next.js
-  // version (14.2.15) — the instrumentation hook itself has been usable
-  // since Next 14, but stays behind `experimental.instrumentationHook`
-  // until Next 15, where it becomes the default with no flag needed.
-  experimental: {
-    instrumentationHook: true,
-  },
+  // Both removed as part of the Next 16 upgrade:
+  //  - `eslint.ignoreDuringBuilds` — `next build` no longer runs ESLint at
+  //    all (that moved to the separate `next lint` command), so the key is
+  //    dead weight; Next now warns it's unrecognized.
+  //  - `experimental.instrumentationHook` — src/instrumentation.ts (the
+  //    SLA-warning background scheduler's entry point) needed this flag on
+  //    Next 14.2.15; instrumentation.js has been picked up by default with
+  //    no flag since Next 15, and Next now warns the key is unrecognized.
 };
 
 // (v9) withSentryConfig() wires the client-side Sentry config

@@ -10,14 +10,15 @@ import CustomFieldsManager from "./CustomFieldsManager";
 import CategoriesManager from "./CategoriesManager";
 import SlaConfigForm from "./SlaConfigForm";
 
-export default async function ProjectDetailPage({ params }: { params: { id: string } }) {
+export default async function ProjectDetailPage({ params }: { params: Promise<{ id: string }> }) {
+  const { id } = await params;
   const scope = await getViewerScope();
   if (!scope) redirect("/login");
   if (!scope.isSuperAdmin && !scope.permissions.canManageTicketForm) redirect("/dashboard");
-  if (!canAccessProject(scope, params.id)) notFound();
+  if (!canAccessProject(scope, id)) notFound();
 
   const project = await prisma.project.findUnique({
-    where: { id: params.id },
+    where: { id },
     include: {
       memberships: { include: { user: { include: { customRole: true } } }, orderBy: { createdAt: "asc" } },
       _count: { select: { tickets: true } },

@@ -72,19 +72,38 @@ export function captureException(err: unknown, extra?: Record<string, unknown>) 
 // try/catch (e.g. src/app/dashboard/export.csv/route.ts below) must detect
 // and rethrow these untouched rather than reporting them to Sentry as bugs
 // (a viewer correctly getting 404'd by access control isn't an incident).
-// Next 14.2.15 doesn't yet export the official `unstable_rethrow` helper
-// for this (added in a later 14.x/15.x release) — this checks the same
-// `digest` convention that helper itself is documented to check.
+// There's now an official `unstable_rethrow` export from `next/navigation`
+// for exactly this, but it's imperative (rethrow-if-internal, else no-op)
+// rather than a boolean predicate, and still prefixed "unstable_" — kept
+// this as a predicate instead so call sites don't need restructuring, just
+// updated to match Next's current digest convention.
+//
+// notFound()'s digest changed from the literal "NEXT_NOT_FOUND" (Next 14)
+// to "NEXT_HTTP_ERROR_FALLBACK;<status>" as of the Next 16 upgrade —
+// confirmed directly against
+// node_modules/next/dist/client/components/http-access-fallback/http-access-fallback.js,
+// which parses it the same way below (split on ";", check the prefix and
+// that the status is one of its own recognized codes). This was a REAL
+// regression the upgrade introduced silently: every legitimate notFound()
+// across this app would otherwise have started reporting to Sentry as a
+// bug on every single 404, not just the ones this comment used to worry
+// about. Caught by tests/integration/access.test.ts's digest assertions
+// failing after the upgrade, not by this file being reviewed in isolation.
 //
 // DYNAMIC_SERVER_USAGE (thrown when a route reads something dynamic, like
 // `req.nextUrl.searchParams` here, while Next is probing whether the route
 // COULD be statically pre-rendered) is the same kind of internal signal,
-// not a real error either — found empirically: `npm run build` was
-// reporting one of these to the no-op Sentry console log for
-// /dashboard/export.csv on every build, since that route is intentionally
-// always-dynamic (it reads query params and the viewer's session).
+// not a real error either, and its digest was unaffected by the Next 16
+// upgrade — found empirically: `npm run build` was reporting one of these
+// to the no-op Sentry console log for /dashboard/export.csv on every
+// build, since that route is intentionally always-dynamic (it reads query
+// params and the viewer's session).
+const HTTP_ACCESS_FALLBACK_CODES = new Set([404, 403, 401]);
+
 export function isNextControlFlowError(err: unknown): boolean {
   const digest = (err as { digest?: unknown } | null)?.digest;
   if (typeof digest !== "string") return false;
-  return digest === "NEXT_NOT_FOUND" || digest === "DYNAMIC_SERVER_USAGE" || digest.startsWith("NEXT_REDIRECT");
+  if (digest === "DYNAMIC_SERVER_USAGE" || digest.startsWith("NEXT_REDIRECT")) return true;
+  const [prefix, status] = digest.split(";");
+  return prefix === "NEXT_HTTP_ERROR_FALLBACK" && HTTP_ACCESS_FALLBACK_CODES.has(Number(status));
 }

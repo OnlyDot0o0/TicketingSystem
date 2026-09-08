@@ -3,6 +3,7 @@
 import { prisma } from "@/lib/prisma";
 import { saveUploadedFile, UploadValidationError } from "@/lib/upload";
 import { STATUS_LABELS } from "@/lib/config";
+import { notifySubmitterReply } from "@/lib/notifications";
 import { redirect } from "next/navigation";
 
 export type ReplyState = { error?: string; success?: boolean };
@@ -30,6 +31,7 @@ export async function submitterReplyAction(
 
   const ticket = await prisma.ticket.findFirst({
     where: { ticketNumber, submitterPhone, projectId: project.id },
+    include: { assignedTo: { select: { email: true } } },
   });
   if (!ticket) {
     return { error: "لم يتم العثور على التذكرة." };
@@ -93,6 +95,18 @@ export async function submitterReplyAction(
     }
     console.error("[submitterReplyAction]", err);
     return { error: "حدث خطأ أثناء إرسال الرد." };
+  }
+
+  // Same "log and continue" pattern as createTicketAction — a notification
+  // failure shouldn't tell the submitter their reply didn't go through when
+  // it actually did.
+  try {
+    await notifySubmitterReply(
+      { ticketNumber: ticket.ticketNumber, subject: ticket.subject, assignedTo: ticket.assignedTo },
+      { id: project.id, slug: project.slug, name: project.name }
+    );
+  } catch (err) {
+    console.error(`[submitterReplyAction] notification failed for ticket ${ticket.ticketNumber}`, err);
   }
 
   redirect(

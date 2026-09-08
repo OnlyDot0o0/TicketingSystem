@@ -11,6 +11,13 @@
 // request, so they're exercised for real here rather than mocked. Only the
 // session resolution boundary (`auth()` from "@/lib/auth", i.e. next-auth)
 // is mocked, since that's genuinely outside this module's own logic.
+//
+// notFound()'s digest changed from the literal "NEXT_NOT_FOUND" (Next 14)
+// to "NEXT_HTTP_ERROR_FALLBACK;404" as of the Next 16 upgrade — confirmed
+// by calling the real vendored function directly
+// (node_modules/next/dist/client/components/not-found.js) rather than
+// guessing. redirect()'s digest ("NEXT_REDIRECT;<type>;<url>;...") was
+// unaffected by that same upgrade.
 import { describe, it, expect, beforeEach, vi } from "vitest";
 import { resetDb, createProject, createUser, addMembership, prisma } from "../helpers/db";
 
@@ -24,6 +31,7 @@ const {
   scopedProjectWhere,
   requireProjectAccess,
   permissionsForBaseRole,
+  canAssignUserToProject,
 } = await import("@/lib/access");
 
 function mockSession(user: { id: string; role: string; name: string; customRoleId?: string | null }) {
@@ -186,7 +194,7 @@ describe("requireScopedViewer", () => {
   it("404s a non-SUPER_ADMIN account with zero project memberships (provisioning gap, not a broken link)", async () => {
     const user = await createUser({ role: "ADMIN" });
     mockSession({ id: user.id, role: "ADMIN", name: user.name });
-    await expectDigest(() => requireScopedViewer(), /^NEXT_NOT_FOUND$/);
+    await expectDigest(() => requireScopedViewer(), /^NEXT_HTTP_ERROR_FALLBACK;404$/);
   });
 
   it("succeeds for SUPER_ADMIN even with zero memberships", async () => {
@@ -250,7 +258,7 @@ describe("scopedProjectWhere — three return shapes", () => {
     mockSession({ id: user.id, role: "AGENT", name: user.name });
     const scope = await requireScopedViewer();
 
-    await expectDigest(async () => scopedProjectWhere(scope, otherProject.id), /^NEXT_NOT_FOUND$/);
+    await expectDigest(async () => scopedProjectWhere(scope, otherProject.id), /^NEXT_HTTP_ERROR_FALLBACK;404$/);
   });
 });
 
@@ -262,7 +270,7 @@ describe("requireProjectAccess", () => {
     await addMembership(user.id, ownProject.id);
     mockSession({ id: user.id, role: "AGENT", name: user.name });
 
-    await expectDigest(() => requireProjectAccess(otherProject.id), /^NEXT_NOT_FOUND$/);
+    await expectDigest(() => requireProjectAccess(otherProject.id), /^NEXT_HTTP_ERROR_FALLBACK;404$/);
   });
 
   it("succeeds and returns the scope when the viewer can access the project", async () => {
@@ -273,5 +281,48 @@ describe("requireProjectAccess", () => {
 
     const scope = await requireProjectAccess(project.id);
     expect(scope.projectIds).toContain(project.id);
+  });
+});
+
+// Guards Ticket.assignedToId: assigning a ticket to someone with no
+// ProjectMembership on that project used to be accepted with no check at
+// all (in both updateTicketAction and bulkAssignAction) — the target would
+// then start receiving SLA-warning/notification emails containing that
+// project's ticket details despite having no dashboard access to see it.
+describe("canAssignUserToProject", () => {
+  it("rejects a user with no membership on the project", async () => {
+    const project = await createProject();
+    const outsider = await createUser({ role: "AGENT" });
+    // No addMembership() call — outsider is not on this project at all.
+
+    expect(await canAssignUserToProject(outsider.id, project.id)).toBe(false);
+  });
+
+  it("accepts a user with a real membership on the project", async () => {
+    const project = await createProject();
+    const member = await createUser({ role: "AGENT" });
+    await addMembership(member.id, project.id);
+
+    expect(await canAssignUserToProject(member.id, project.id)).toBe(true);
+  });
+
+  it("accepts SUPER_ADMIN unconditionally, membership or not", async () => {
+    const project = await createProject();
+    const superAdmin = await createUser({ role: "SUPER_ADMIN" });
+
+    expect(await canAssignUserToProject(superAdmin.id, project.id)).toBe(true);
+  });
+
+  it("rejects a deactivated user even if they have a real membership", async () => {
+    const project = await createProject();
+    const disabled = await createUser({ role: "AGENT", active: false });
+    await addMembership(disabled.id, project.id);
+
+    expect(await canAssignUserToProject(disabled.id, project.id)).toBe(false);
+  });
+
+  it("rejects a nonexistent user id", async () => {
+    const project = await createProject();
+    expect(await canAssignUserToProject("not-a-real-user-id", project.id)).toBe(false);
   });
 });

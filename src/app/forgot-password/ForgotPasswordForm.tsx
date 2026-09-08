@@ -1,6 +1,7 @@
 "use client";
 
-import { useFormState, useFormStatus } from "react-dom";
+import { useActionState } from "react";
+import { useFormStatus } from "react-dom";
 import { forgotPasswordAction, ForgotPasswordState } from "./actions";
 
 const initialState: ForgotPasswordState = {};
@@ -15,7 +16,7 @@ function SubmitButton() {
 }
 
 export default function ForgotPasswordForm() {
-  const [state, formAction] = useFormState(forgotPasswordAction, initialState);
+  const [state, formAction] = useActionState(forgotPasswordAction, initialState);
 
   if (state?.submitted) {
     return (

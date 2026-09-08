@@ -1,7 +1,8 @@
 "use client";
 
 import { useState } from "react";
-import { useFormState, useFormStatus } from "react-dom";
+import { useActionState } from "react";
+import { useFormStatus } from "react-dom";
 import { createCustomRoleAction, RoleFormState } from "./actions";
 import { ROLE_LABELS, PERMISSION_LABELS } from "@/lib/config";
 
@@ -18,7 +19,7 @@ function SubmitButton() {
 }
 
 export default function CreateRoleForm() {
-  const [state, formAction] = useFormState(createCustomRoleAction, initialState);
+  const [state, formAction] = useActionState(createCustomRoleAction, initialState);
   const [baseRole, setBaseRole] = useState<"ADMIN" | "AGENT">("AGENT");
   // Pre-checks each toggle to match the chosen base role's default
   // (ADMIN = all true, AGENT = all false) as a sensible starting point —

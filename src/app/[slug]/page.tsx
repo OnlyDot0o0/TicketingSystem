@@ -5,9 +5,10 @@ import { getProjectBySlugOr404 } from "@/lib/projects";
 export default async function ProjectLandingPage({
   params,
 }: {
-  params: { slug: string };
+  params: Promise<{ slug: string }>;
 }) {
-  const project = await getProjectBySlugOr404(params.slug);
+  const { slug } = await params;
+  const project = await getProjectBySlugOr404(slug);
 
   return (
     <div className="flex min-h-screen flex-col">

@@ -1,6 +1,7 @@
 "use client";
 
-import { useFormState, useFormStatus } from "react-dom";
+import { useActionState } from "react";
+import { useFormStatus } from "react-dom";
 import { submitterReplyAction, ReplyState } from "./actions";
 
 const initialState: ReplyState = {};
@@ -23,7 +24,7 @@ export default function ReplyForm({
   ticketNumber: string;
   submitterPhone: string;
 }) {
-  const [state, formAction] = useFormState(submitterReplyAction.bind(null, slug), initialState);
+  const [state, formAction] = useActionState(submitterReplyAction.bind(null, slug), initialState);
 
   return (
     <form action={formAction} encType="multipart/form-data" className="mt-4 space-y-3 border-t border-border pt-4">

@@ -1,6 +1,7 @@
 "use client";
 
-import { useFormState, useFormStatus } from "react-dom";
+import { useActionState } from "react";
+import { useFormStatus } from "react-dom";
 import { updateTicketFormConfigAction, ProjectFormState } from "../actions";
 import { FIELD_MODE_LABELS, FULL_FIELD_MODES, RESTRICTED_FIELD_MODES } from "@/lib/config";
 
@@ -43,7 +44,7 @@ export default function TicketFormConfigForm({
   priorityMode: string;
   attachmentsMode: string;
 }) {
-  const [state, formAction] = useFormState(updateTicketFormConfigAction, initialState);
+  const [state, formAction] = useActionState(updateTicketFormConfigAction, initialState);
 
   return (
     <form action={formAction} className="space-y-3">
