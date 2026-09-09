@@ -1,4 +1,58 @@
-const { withSentryConfig } = require("@sentry/nextjs");
+// @sentry/nextjs 10.x deprecated the top-level `withSentryConfig` export in
+// favor of this subpath (top-level still works but logs a deprecation
+// warning on every build as of this version — confirmed by a real
+// `npm run build`; will be removed entirely in v11).
+const { withSentryConfig } = require("@sentry/nextjs/config");
+
+// Security response headers, applied to every route. This app has no
+// third-party script/style origins to allow (no Google Fonts, no CDN
+// scripts, no next/font — confirmed by grep before writing this) EXCEPT
+// Sentry's ingest endpoint once SENTRY_DSN is actually configured, and no
+// external image sources (no next/image remotePatterns configured).
+//
+// **Known, deliberate tradeoff**: script-src and style-src both need
+// 'unsafe-inline'. Next.js's App Router streams RSC hydration payloads via
+// inline <script> tags it injects itself (no code in this app controls
+// that), and this app renders each project's accent-color branding via
+// inline `style={{ color: "var(--accent)" }}` in 18+ files (confirmed by
+// grep) rather than per-project stylesheets — ripping that out for a
+// nonce-based strict CSP is a real refactor of the theming system, not a
+// header change, and is intentionally left as a follow-up rather than
+// either silently shipping a broken app or silently shipping a CSP that
+// only pretends to restrict scripts/styles. Even with 'unsafe-inline'
+// present, this still blocks loading a script/stylesheet from any THIRD-
+// PARTY origin (the common "inject a <script src=https://evil.example/x.js>"
+// XSS payload shape), and frame-ancestors/form-action/object-src/base-uri
+// below are all real, unweakened protections regardless.
+// React's DEVELOPMENT build calls eval() for its own debugging tooling
+// (reconstructing component stack traces) — confirmed live: without this,
+// `next dev` logs "eval() is not supported... make sure unsafe-eval is
+// included" in the browser console on every page load. React's own error
+// text is explicit that "React will never use eval() in production mode",
+// so this only ever widens script-src in development, never in the build
+// that actually ships.
+const isDev = process.env.NODE_ENV !== "production";
+
+const CSP = [
+  "default-src 'self'",
+  `script-src 'self' 'unsafe-inline'${isDev ? " 'unsafe-eval'" : ""}`,
+  "style-src 'self' 'unsafe-inline'",
+  "img-src 'self' data:",
+  "font-src 'self'",
+  // Sentry's ingest endpoint (only ever contacted once SENTRY_DSN /
+  // NEXT_PUBLIC_SENTRY_DSN is actually set — see src/lib/sentry.ts).
+  // Covers both the legacy and current regional ingest hostnames since the
+  // exact per-project subdomain isn't known ahead of time.
+  "connect-src 'self' https://*.sentry.io https://*.ingest.sentry.io https://*.ingest.us.sentry.io",
+  "object-src 'none'",
+  "base-uri 'self'",
+  "form-action 'self'",
+  // Real clickjacking protection (stronger/more reliable than the
+  // X-Frame-Options header below across modern browsers) — this app is
+  // never meant to be framed by another site.
+  "frame-ancestors 'none'",
+  "upgrade-insecure-requests",
+].join("; ");
 
 /** @type {import('next').NextConfig} */
 const nextConfig = {
@@ -10,6 +64,30 @@ const nextConfig = {
   //    SLA-warning background scheduler's entry point) needed this flag on
   //    Next 14.2.15; instrumentation.js has been picked up by default with
   //    no flag since Next 15, and Next now warns the key is unrecognized.
+  async headers() {
+    return [
+      {
+        source: "/:path*",
+        headers: [
+          { key: "Content-Security-Policy", value: CSP },
+          // frame-ancestors above is the real protection; this is kept as
+          // defense-in-depth for the handful of older browsers that still
+          // honor X-Frame-Options but not the CSP directive.
+          { key: "X-Frame-Options", value: "DENY" },
+          { key: "X-Content-Type-Options", value: "nosniff" },
+          { key: "Referrer-Policy", value: "strict-origin-when-cross-origin" },
+          // Blanket-disables browser features this app never uses. Safe to
+          // always send — harmless if a viewer's browser doesn't recognize
+          // a given feature name, and takes effect regardless of protocol.
+          { key: "Permissions-Policy", value: "camera=(), microphone=(), geolocation=(), interest-cohort=()" },
+          // Only enforced by browsers on a real https:// origin (ignored
+          // over plain http and for localhost by spec), so safe to always
+          // send in every environment including local dev.
+          { key: "Strict-Transport-Security", value: "max-age=63072000; includeSubDomains; preload" },
+        ],
+      },
+    ];
+  },
 };
 
 // (v9) withSentryConfig() wires the client-side Sentry config

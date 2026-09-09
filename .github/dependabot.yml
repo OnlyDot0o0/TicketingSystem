@@ -1,0 +1,32 @@
+version: 2
+updates:
+  # Opens PRs automatically for vulnerable/outdated npm dependencies — pairs
+  # with the "Dependency vulnerability audit" job in
+  # .github/workflows/ci.yml, which only *detects* a new vulnerability on
+  # every push/PR. Without this, detecting one still means someone has to
+  # remember to go fix it by hand, which is exactly how the 6 vulnerabilities
+  # (3 critical, 3 high) already found and fixed in this project's history
+  # went unnoticed for as long as they did.
+  - package-ecosystem: "npm"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    # Caps how many update PRs can be open at once so this doesn't flood
+    # the repo — security updates aren't capped by this limit (Dependabot
+    # always opens those regardless), only routine version-bump PRs are.
+    open-pull-requests-limit: 10
+    groups:
+      # Batches routine, low-risk patch/minor bumps into one PR instead of
+      # one-PR-per-package — security updates are never grouped, so a
+      # critical fix always still gets its own immediately-actionable PR.
+      minor-and-patch:
+        update-types:
+          - "minor"
+          - "patch"
+
+  # Keeps the CI workflow's own actions (checkout, setup-node) current —
+  # easy to forget since it's not part of the npm dependency tree at all.
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"

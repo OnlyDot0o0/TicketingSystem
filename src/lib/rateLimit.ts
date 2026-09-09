@@ -1,4 +1,4 @@
-// Rate limiter for login/TOTP attempts and public ticket creation, with two
+// Rate limiter for login attempts and public ticket creation, with two
 // backends:
 //
 //  - **In-memory, fixed-window-ish sliding log** (a `Map` of rolling
@@ -22,7 +22,7 @@
 // change per call site, not a logic change.
 //
 // Buckets are keyed by an arbitrary string ("phone:0501234567",
-// "ip:1.2.3.4", "login:<email>:<ip>", "totp:<email>:<ip>").
+// "ip:1.2.3.4", "login:<email>:<ip>").
 
 import Redis from "ioredis";
 
@@ -139,7 +139,7 @@ export async function checkRateLimit(key: string, max: number, windowMs: number)
     // the request is abusive — and unlike src/lib/captcha.ts (which fails
     // closed on a verification error because CAPTCHA is one specific
     // anti-bot check for one form), a rate-limit check sits in front of
-    // login, TOTP, AND public ticket submission; failing closed here would
+    // login AND public ticket submission; failing closed here would
     // mean a Redis blip locks every user in the app out of everything at
     // once, which is a worse outcome than temporarily running without this
     // particular protection.
@@ -151,7 +151,7 @@ export async function checkRateLimit(key: string, max: number, windowMs: number)
 export const TICKET_RATE_LIMIT_PER_PHONE = 5; // per hour
 export const TICKET_RATE_LIMIT_PER_IP = 10; // per hour
 
-// forgot-password had no rate limiting at all, unlike login/TOTP and public
+// forgot-password had no rate limiting at all, unlike login and public
 // ticket creation — same two-bucket shape as the ticket limiter above: a
 // tight per-email cap (stop one inbox from being bombed with reset links)
 // plus a looser per-IP cap (stop one source from sweeping many addresses).

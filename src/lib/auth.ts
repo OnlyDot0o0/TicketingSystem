@@ -1,27 +1,25 @@
 import NextAuth from "next-auth";
 import Credentials from "next-auth/providers/credentials";
-import { CredentialsSignin } from "next-auth";
 import bcrypt from "bcryptjs";
 import { prisma } from "./prisma";
-import { verifyTotpCode } from "./totp";
-
-// Thrown from authorize() below when a TOTP-enrolled account has the right
-// password but hasn't submitted a code yet. next-auth wraps any
-// CredentialsSignin subclass thrown from authorize() and rethrows the same
-// instance back through signIn() when called from a server action (see
-// loginAction in src/app/login/actions.ts) — `code` survives the round
-// trip, so the login form can tell "need a code" apart from "wrong
-// password" without leaking that distinction to a would-be attacker who
-// hasn't gotten the password right yet.
-export class TotpRequiredError extends CredentialsSignin {
-  code = "totp_required";
-}
-export class TotpInvalidError extends CredentialsSignin {
-  code = "totp_invalid";
-}
 
 export const { handlers, auth, signIn, signOut, unstable_update } = NextAuth({
-  session: { strategy: "jwt" },
+  session: {
+    strategy: "jwt",
+    // No maxAge/updateAge here before this meant NextAuth's own default:
+    // a 30-day session with no idle cap — far too long for a staff tool
+    // with access to customer contact info and internal notes. maxAge is
+    // the hard ceiling (re-login required once a session has existed this
+    // long regardless of activity); updateAge is how often an ACTIVE
+    // session's expiry silently rolls forward, so a genuinely idle session
+    // still expires at updateAge past the last real request rather than
+    // sitting valid for the full maxAge. 12h/1h gives staff a full
+    // workday before being forced to re-login while still capping how
+    // long a forgotten, unattended session (e.g. a shared/kiosk machine)
+    // stays valid.
+    maxAge: 12 * 60 * 60, // 12 hours
+    updateAge: 60 * 60, // 1 hour
+  },
   pages: {
     signIn: "/login",
   },
@@ -31,7 +29,6 @@ export const { handlers, auth, signIn, signOut, unstable_update } = NextAuth({
       credentials: {
         email: { label: "البريد الإلكتروني", type: "email" },
         password: { label: "كلمة المرور", type: "password" },
-        totpCode: { label: "رمز التحقق", type: "text" },
       },
       authorize: async (credentials) => {
         const email = credentials?.email as string | undefined;
@@ -43,17 +40,6 @@ export const { handlers, auth, signIn, signOut, unstable_update } = NextAuth({
 
         const valid = await bcrypt.compare(password, user.passwordHash);
         if (!valid) return null;
-
-        // Password is correct. Accounts that never enrolled in 2FA sign in
-        // exactly as before (single step). Enrolled accounts need a second,
-        // valid TOTP code before a session is issued — loginAction rate-
-        // limits code attempts before ever reaching this point.
-        if (user.totpEnabled && user.totpSecret) {
-          const totpCode = credentials?.totpCode as string | undefined;
-          if (!totpCode) throw new TotpRequiredError();
-          const codeValid = await verifyTotpCode(user.totpSecret, totpCode);
-          if (!codeValid) throw new TotpInvalidError();
-        }
 
         return {
           id: user.id,
@@ -75,12 +61,26 @@ export const { handlers, auth, signIn, signOut, unstable_update } = NextAuth({
         token.mustChangePassword = (user as { mustChangePassword?: boolean }).mustChangePassword ?? false;
       }
       // Triggered by unstable_update() from a server action (e.g. after
-      // changePasswordAction clears the DB flag) — merges the caller-
+      // changePasswordAction clears the DB flag, or updateAccountInfoAction
+      // changes the signed-in user's own name/email) — merges the caller-
       // supplied partial session into the token without a full re-sign-in.
       if (trigger === "update" && session && typeof session === "object") {
-        const patch = (session as { user?: { mustChangePassword?: boolean } }).user;
+        const patch = (session as { user?: { mustChangePassword?: boolean; name?: string; email?: string } }).user;
         if (patch && typeof patch.mustChangePassword === "boolean") {
           token.mustChangePassword = patch.mustChangePassword;
+        }
+        // name/email live on the token via NextAuth's own default fields
+        // (it populates them from authorize()'s return value at sign-in,
+        // and the default session callback mirrors them onto session.user
+        // before this file's custom session() callback below ever runs) —
+        // so patching them here is enough to make an in-place account-info
+        // edit show up immediately, with no separate handling needed in
+        // the session() callback.
+        if (patch && typeof patch.name === "string") {
+          token.name = patch.name;
+        }
+        if (patch && typeof patch.email === "string") {
+          token.email = patch.email;
         }
       }
       return token;

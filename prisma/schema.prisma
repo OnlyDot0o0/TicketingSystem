@@ -35,10 +35,11 @@
 // ADMIN/AGENT — only SUPER_ADMIN itself is ever global.
 //
 // v5 (hardening pass): User gained mustChangePassword (forced first-login
-// password change for admin-created accounts) and totpSecret/totpEnabled
-// (self-service TOTP 2FA). A new AdminActivity model mirrors TicketActivity
-// but for administrative actions (project/role/team changes) that
-// previously left no audit trail — see /dashboard/audit (SUPER_ADMIN-only).
+// password change for admin-created accounts). A new AdminActivity model
+// mirrors TicketActivity but for administrative actions (project/role/team
+// changes) that previously left no audit trail — see /dashboard/audit
+// (SUPER_ADMIN-only). (Self-service TOTP 2FA was added in this same round
+// and later removed — not needed for this deployment's threat model.)
 //
 // v6: ticket categories and SLA-by-priority timings are now per-project,
 // closing out the two items that were previously called out as still
@@ -79,17 +80,6 @@ model User {
   // dashboard is reachable. Cleared by changePasswordAction once they set
   // their own password.
   mustChangePassword Boolean @default(false)
-
-  // TOTP 2FA (self-service, staff only — see /dashboard/settings).
-  // totpSecret is the raw base32 secret, intentionally NOT hashed: unlike a
-  // password, the server must be able to recompute/verify a 6-digit code
-  // against it on every login, which a one-way hash would make impossible.
-  // This is standard practice for TOTP (the same tradeoff every
-  // authenticator-app integration makes). Null until the user enrolls;
-  // totpEnabled only flips true after they prove they scanned the QR code
-  // by submitting one valid code back (see enrollTotpAction).
-  totpSecret  String?
-  totpEnabled Boolean @default(false)
 
   assignedTickets Ticket[]             @relation("AssignedAgent")
   memberships     ProjectMembership[]

@@ -141,9 +141,6 @@ model User {
 
   mustChangePassword Boolean @default(false)
 
-  totpSecret  String?
-  totpEnabled Boolean @default(false)
-
   assignedTickets Ticket[]             @relation("AssignedAgent")
   memberships     ProjectMembership[]
   resetTokens     PasswordResetToken[]

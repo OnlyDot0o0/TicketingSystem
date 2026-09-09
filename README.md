@@ -34,10 +34,8 @@ project-scoped team.
 - **Prisma ORM** — ships with **SQLite** for zero-dependency local dev
   (`prisma/dev.db`); switching to Postgres in production is a one-line
   datasource change (see [Path to production deploy](#path-to-production-deploy))
-- **Auth.js (NextAuth v5)**, Credentials provider (email + bcrypt password,
-  optionally a second TOTP step), for the support team only (`SUPER_ADMIN` /
-  `ADMIN` / `AGENT` / `CUSTOM` roles)
-- **otplib** + **qrcode** — self-service TOTP 2FA, no external service
+- **Auth.js (NextAuth v5)**, Credentials provider (email + bcrypt password),
+  for the support team only (`SUPER_ADMIN` / `ADMIN` / `AGENT` / `CUSTOM` roles)
 - **recharts** for the reporting dashboard
 - **nodemailer** for email notifications (ticket lifecycle + password
   reset) — degrades gracefully (logs to console instead of crashing) when
@@ -164,7 +162,7 @@ local dev) and fill in real values for production:
 | `/dashboard/projects` | `SUPER_ADMIN`: create/edit any project. `ADMIN`: read-only list of their own project(s) |
 | `/dashboard/projects/[id]` | Project detail: ticket-form config (SUPER_ADMIN + project ADMIN) + team members (SUPER_ADMIN only) |
 | `/dashboard/change-password` | Forced first-login password change for admin-created accounts |
-| `/dashboard/settings` | Any logged-in staff account — self-service TOTP 2FA enrollment/disable |
+| `/dashboard/settings` | Any logged-in staff account — self-service account info, email, and password |
 | `/dashboard/audit` | `SUPER_ADMIN`-only — the admin activity log |
 | `/dashboard/roles` | `SUPER_ADMIN`-only — manage custom roles |
 | `/csat/[ticketId]` | Public, unauthenticated one-click CSAT rating landing page — linked from the "resolved" notification email |
@@ -494,12 +492,28 @@ positive integers.
 
 ## Security
 
+- **Security response headers** (`next.config.js`, applied to every route)
+  — CSP, `X-Frame-Options`, `X-Content-Type-Options: nosniff`,
+  `Referrer-Policy`, `Permissions-Policy`, and HSTS. The CSP's `script-src`
+  and `style-src` both include `'unsafe-inline'` — a deliberate, documented
+  tradeoff: Next.js's own App Router hydration relies on inline `<script>`
+  tags it injects itself, and this app renders per-project accent-color
+  branding via inline `style={{}}` in 18+ files rather than per-project
+  stylesheets. A nonce-based strict CSP is possible but means refactoring
+  that theming approach first, not just a header change — see the comment
+  above the policy in `next.config.js` for the full reasoning. Even so,
+  `frame-ancestors 'none'`, `object-src 'none'`, `base-uri 'self'`, and
+  `form-action 'self'` are real, unweakened protections, and `script-src`/
+  `style-src` still block loading from any third-party origin.
+- **Session policy** (`src/lib/auth.ts`) — 12-hour absolute session
+  lifetime with a 1-hour rolling refresh on activity (previously unset,
+  meaning NextAuth's own 30-day default with no idle cap applied).
 - **Honeypot**: a hidden field (`name="website"`) on the public ticket
   form, invisible to real users but usually auto-filled by bots. A non-empty
   submission is silently discarded — no error, no ticket, no signal given
   back to the bot.
 - **Rate limiting** (`src/lib/rateLimit.ts`): max 5 ticket submissions per
-  phone number per hour, 10 per IP per hour; login/TOTP attempts capped
+  phone number per hour, 10 per IP per hour; login attempts capped
   similarly; the forgot-password flow at 3 requests per email and 10 per IP
   per hour. Defaults to an in-memory sliding-log counter, correct for a
   single-instance deployment. Set `REDIS_URL` to switch to a Redis-backed
@@ -507,7 +521,7 @@ positive integers.
   a genuinely different algorithm (fixed windows can allow a short burst at
   a window boundary a sliding log wouldn't), an accepted trade-off for
   cross-instance correctness. **Fails open**, not closed, on a Redis error —
-  this limiter sits in front of login, TOTP, and public ticket submission,
+  this limiter sits in front of login and public ticket submission,
   so failing closed on an outage would lock everyone out of everything,
   worse than briefly running without this one layer of abuse protection.
 - **Optional CAPTCHA** (`src/lib/captcha.ts`) — hCaptcha or reCAPTCHA v2,
@@ -531,15 +545,18 @@ positive integers.
   ticket-form-config updates, project-membership changes, custom-role
   create/update/delete, and agent account create/role-change/activate/
   deactivate all leave a trail. `/dashboard/audit` (`SUPER_ADMIN`-only)
-  lists it newest-first with an action-type filter, capped at 200 rows.
-- **TOTP 2FA for staff accounts** — self-contained, works with any standard
-  authenticator app (Google Authenticator, Authy, etc.) via `otplib` +
-  `qrcode`, no external service. Enrollment (`/dashboard/settings`,
-  reachable by any logged-in staff account) only flips `totpEnabled` true
-  once a real generated code is confirmed back — proving the account holder
-  actually scanned it. Disabling requires the current password. TOTP code
-  attempts share the general login rate limiter's window (see
-  [Known limitations](#known-limitations)).
+  lists it newest-first with an action-type filter, real pagination
+  (50/page).
+- **Self-service account settings** (`/dashboard/settings`, reachable by any
+  logged-in staff account) — view/edit your own name and email, and change
+  your own password, both gated behind re-entering the **current** password
+  (same reasoning as everywhere else in this app that a sensitive change
+  needs stronger confirmation than a plain click). Distinct from the
+  forced first-login flow above: `changePasswordAction` only runs once
+  (while `mustChangePassword` is still set), while `changeOwnPasswordAction`
+  here works for any already-active account, anytime. Editing your own
+  email updates the session in place (`unstable_update()`) so the current
+  session keeps working — only the *next* login needs the new address.
 
 ## Production-readiness integrations
 
@@ -665,14 +682,33 @@ Anything that touches the database runs against a separate SQLite file,
 ### What's deliberately not covered here
 
 This is a unit/integration-level suite, not end-to-end browser automation —
-full click-through flows (2FA enrollment, CSV download, multipart file
-upload, real email delivery) still need manual verification against a real
-dev server. Also out of scope: the S3 storage driver and the Redis rate
+full click-through flows (CSV download, multipart file upload, real email
+delivery) still need manual verification against a real dev server. Also
+out of scope: the S3 storage driver and the Redis rate
 limiter's actual network path (only the in-memory fallback and local-disk
 driver are exercised — the third-party library behavior itself isn't this
 app's logic to test), and the SLA-warning scheduler's `setInterval` wiring
 (its decision logic, `needsSlaWarning()`, is fully covered — the periodic-
 polling plumbing around it isn't).
+
+### Continuous integration
+
+`.github/workflows/ci.yml` runs on every push/PR to `main`: typecheck,
+test suite, and production build in one job, plus a separate
+`npm audit --audit-level=high` job (currently at a clean 0-vulnerability
+baseline) so a newly-disclosed vulnerability shows up as its own failing
+check instead of depending on someone remembering to run `npm audit` by
+hand — which is how the 6 vulnerabilities (3 critical, 3 high) already
+found and fixed in this project's history were originally caught.
+`.github/dependabot.yml` pairs with it, opening the actual fix PRs weekly.
+
+Uses `npm install`, not `npm ci`: this repo's dependency graph has a real,
+confirmed-reproducible incompatibility with `npm ci`'s strict lockfile
+validation (`@sentry/nextjs` → `@sentry/webpack-plugin` peer-depends on
+`webpack`, which this app never installs since Next 16 builds via
+Turbopack, not webpack) — see the comment above the install step in
+`ci.yml` for the full trace, including confirming it still fails against a
+completely from-scratch `node_modules`/lockfile.
 
 ## Path to production deploy
 
@@ -736,7 +772,6 @@ src/lib/storage.ts              ObjectStorage abstraction (local disk default / 
 src/lib/slaWarningScheduler.ts  Periodic SLA-breach warning check — setInterval registered via src/instrumentation.ts
 src/lib/captcha.ts              Optional hCaptcha/reCAPTCHA v2 support
 src/lib/passwordReset.ts        Hashed, single-use, time-limited reset tokens
-src/lib/totp.ts                 otplib/qrcode wrapper — secret gen, QR data URI, code verification
 src/lib/                        auth, prisma client, mail, notifications, SLA calc,
                                  upload, config, projects (slug resolution + field-mode types)
 src/instrumentation.ts          Next.js instrumentation hook — starts the SLA-warning scheduler; also initializes Sentry per-runtime
@@ -759,7 +794,7 @@ src/app/dashboard/TicketQueueTable.tsx  ticket queue table incl. checkboxes + bu
 src/app/dashboard/bulk-actions.ts       bulk status/assign/tag server actions, per-ticket access re-check
 src/app/dashboard/export.csv/   CSV export of the currently-filtered queue
 src/app/dashboard/change-password/  forced first-login password change
-src/app/dashboard/settings/     self-service TOTP 2FA enrollment/disable, any staff account
+src/app/dashboard/settings/     self-service account info, email, and password change, any staff account
 src/app/dashboard/audit/        SUPER_ADMIN-only admin activity log
 src/app/dashboard/projects/     SUPER_ADMIN: create/edit any project; ADMIN: own project(s) only
 src/app/dashboard/projects/[id] ticket-form config + team membership
@@ -841,18 +876,6 @@ What's actually in place for this:
   history exports everything matching the filter in one request. Fine at
   current scale; at tens/hundreds of thousands of tickets, move to a
   streamed response or a background-job-plus-download-link pattern.
-- Bulk-assign (and the existing single-ticket assign) doesn't re-validate
-  server-side that the chosen agent actually has `ProjectMembership` in the
-  ticket's project — the assignee dropdown is pre-scoped client-side, but
-  nothing re-checks it server-side.
-- The dedicated TOTP rate-limit bucket is real but largely shadowed by the
-  general login limiter, which already caps every submission (password-only
-  or code) at 10/hour per email+IP. Not a security gap — codes are capped
-  either way — but the two limits don't behave fully independently.
-- `/dashboard/audit` has no pagination past its 200-row cap.
-- Disabling TOTP clears `totpSecret` entirely rather than keeping it around
-  — re-enabling always means a fresh QR scan, a deliberate choice over
-  leaving a stale secret in the database.
 - Most server actions handle their own expected failures internally
   (returning `{ error: "..." }`) rather than being individually wrapped
   with Sentry's `captureException` — only the two React error boundaries
