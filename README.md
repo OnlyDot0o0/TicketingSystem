@@ -52,10 +52,18 @@ project-scoped team.
 
 ```bash
 npm install
+cp .env.example .env       # fill in real values later; defaults work for local dev as-is
 npx prisma migrate dev     # applies the schema to prisma/dev.db
 npm run prisma:seed        # seeds users + three demo projects with tickets
 npm run dev                # http://localhost:3000
 ```
+
+`prisma/dev.db` itself is gitignored on purpose — a real database is never
+committed to source control. Every clone starts with an empty schema until
+`prisma migrate dev` + `npm run prisma:seed` run; skipping either (or
+missing the `.env` copy step, which leaves `DATABASE_URL` unset and makes
+`migrate dev` fail outright) is why a fresh checkout looks like it has no
+projects or tickets.
 
 If you're picking up an existing `dev.db` that predates this schema, reset
 rather than trying to backfill it:
@@ -64,6 +72,15 @@ rather than trying to backfill it:
 npx prisma migrate reset --force --skip-seed   # drops + recreates dev.db, replays migrations
 npm run prisma:seed
 ```
+
+**Setting up the real project without the local-dev demo clutter**: run
+`npm run prisma:seed:essentials` instead of `npm run prisma:seed`. It creates
+just the one real `راقبة+` project (its actual accent color, ticket prefix,
+FAQ link, categories, and the "رقم الحساب" custom field, exactly as
+configured on it) plus a single `SUPER_ADMIN` account — no `demo`/`acme`
+projects, no fake sample tickets, no extra test accounts. Use this when
+handing the app to someone who needs the real project ready to go, not a
+demo environment.
 
 ### Seeded data
 
