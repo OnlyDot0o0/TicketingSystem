@@ -97,17 +97,16 @@ export async function submitterReplyAction(
     return { error: "حدث خطأ أثناء إرسال الرد." };
   }
 
-  // Same "log and continue" pattern as createTicketAction — a notification
-  // failure shouldn't tell the submitter their reply didn't go through when
-  // it actually did.
-  try {
-    await notifySubmitterReply(
-      { ticketNumber: ticket.ticketNumber, subject: ticket.subject, assignedTo: ticket.assignedTo },
-      { id: project.id, slug: project.slug, name: project.name }
-    );
-  } catch (err) {
+  // Not awaited, same reasoning as createTicketAction — a notification
+  // failure (or the Gmail relay's multi-second redirect hop, see
+  // src/lib/mail.ts) shouldn't tell the submitter their reply didn't go
+  // through, or make them wait on it, when it actually did.
+  notifySubmitterReply(
+    { ticketNumber: ticket.ticketNumber, subject: ticket.subject, assignedTo: ticket.assignedTo },
+    { id: project.id, slug: project.slug, name: project.name }
+  ).catch((err) => {
     console.error(`[submitterReplyAction] notification failed for ticket ${ticket.ticketNumber}`, err);
-  }
+  });
 
   redirect(
     `/${slug}/tickets/track?ticketNumber=${encodeURIComponent(ticketNumber)}&phone=${encodeURIComponent(

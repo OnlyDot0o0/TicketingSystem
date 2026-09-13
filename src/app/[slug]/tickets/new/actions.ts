@@ -240,19 +240,21 @@ export async function createTicketAction(
     }
   }
 
-  try {
-    await notifyTicketCreated(
-      {
-        ticketNumber: ticket.ticketNumber,
-        subject: ticket.subject,
-        submitterEmail: ticket.submitterEmail,
-        categoryLabel: projectCategories.find((c) => c.key === ticket.category)?.label ?? ticket.category,
-      },
-      { id: project.id, slug: project.slug, name: project.name }
-    );
-  } catch (err) {
+  // Not awaited: notification delivery (particularly the Gmail relay's
+  // Google-side redirect hop, see src/lib/mail.ts) can take many seconds and
+  // must never make the submitter wait on it — the ticket is already saved,
+  // so let this run in the background and just log if it fails.
+  notifyTicketCreated(
+    {
+      ticketNumber: ticket.ticketNumber,
+      subject: ticket.subject,
+      submitterEmail: ticket.submitterEmail,
+      categoryLabel: projectCategories.find((c) => c.key === ticket.category)?.label ?? ticket.category,
+    },
+    { id: project.id, slug: project.slug, name: project.name }
+  ).catch((err) => {
     console.error(`[createTicketAction] notification failed for ticket ${ticket.ticketNumber}`, err);
-  }
+  });
 
   redirect(`/${slug}/tickets/new/success?ticket=${ticketNumber}&id=${ticketId}`);
 }

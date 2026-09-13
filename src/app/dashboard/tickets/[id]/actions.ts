@@ -83,10 +83,16 @@ export async function agentReplyAction(
           },
         });
       }
-      await notifyAgentReply(
+      // Not awaited — a notification failure (or the Gmail relay's
+      // multi-second redirect hop, see src/lib/mail.ts) must not surface as
+      // "your reply failed to send" to the agent, nor make them wait on it,
+      // when the reply itself already saved successfully above.
+      notifyAgentReply(
         { ticketNumber: ticket.ticketNumber, submitterEmail: ticket.submitterEmail },
         { slug: ticket.project.slug, name: ticket.project.name }
-      );
+      ).catch((err) => {
+        console.error(`[agentReplyAction] notification failed for ticket ${ticket.ticketNumber}`, err);
+      });
     }
   } catch (err) {
     if (err instanceof UploadValidationError) return { error: err.message };
@@ -185,10 +191,16 @@ export async function updateTicketAction(formData: FormData) {
     }
 
     if (data.status === "RESOLVED") {
-      await notifyResolved(
+      // Not awaited — same reasoning as agentReplyAction above: the status
+      // update already succeeded, so a notification failure or the Gmail
+      // relay's multi-second redirect hop (see src/lib/mail.ts) must not
+      // block or fail this action.
+      notifyResolved(
         { id: ticket.id, ticketNumber: ticket.ticketNumber, submitterEmail: ticket.submitterEmail },
         { slug: ticket.project.slug, name: ticket.project.name }
-      );
+      ).catch((err) => {
+        console.error(`[updateTicketAction] notification failed for ticket ${ticket.ticketNumber}`, err);
+      });
     }
   }
 

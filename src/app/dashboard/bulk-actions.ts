@@ -73,10 +73,18 @@ export async function bulkUpdateStatusAction(ticketIds: string[], status: string
     });
 
     if (status === "RESOLVED") {
-      await notifyResolved(
+      // Not awaited — this runs inside a loop over every selected ticket, so
+      // awaiting each send (particularly the Gmail relay's multi-second
+      // redirect hop, see src/lib/mail.ts) would serialize the whole bulk
+      // action behind N sequential network round-trips. The status update
+      // already succeeded, so a notification failure here shouldn't block or
+      // fail the rest of the batch either.
+      notifyResolved(
         { id: ticket.id, ticketNumber: ticket.ticketNumber, submitterEmail: ticket.submitterEmail },
         { slug: ticket.project.slug, name: ticket.project.name }
-      );
+      ).catch((err) => {
+        console.error(`[bulkUpdateStatusAction] resolved-notification failed for ticket ${ticket.ticketNumber}`, err);
+      });
     }
     updated++;
   }
