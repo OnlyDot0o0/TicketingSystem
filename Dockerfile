@@ -44,6 +44,23 @@ ENV HOSTNAME=0.0.0.0
 RUN groupadd --system --gid 1001 nodejs \
     && useradd --system --uid 1001 --gid nodejs nextjs
 
+# Full node_modules FIRST, standalone output SECOND — order matters here.
+# node_modules/@prisma/client/index.js is just a thin loader; the actual
+# generated query engine + client code `prisma generate` produces lives in
+# the separate node_modules/.prisma/client/ (dot-prefixed, outside the
+# @prisma/ scope). deps' node_modules predates `prisma generate` entirely
+# (that only runs later, in the builder stage), so it has @prisma/client's
+# un-generated stub and no .prisma/client/ at all — copying it AFTER the
+# standalone output would silently overwrite the correctly-generated client
+# with that stub, which is exactly what broke this the first time: the app
+# crashed at boot with "@prisma/client did not initialize yet. Please run
+# 'prisma generate'" (confirmed via a real CI container's logs). Copying
+# full node_modules first and letting the standalone copy land on top
+# means its properly-generated client wins, while still filling in the
+# `prisma` CLI + its transitive deps (needed for docker-entrypoint.sh's
+# `prisma migrate deploy`) that the standalone trace alone doesn't include.
+COPY --from=deps /app/node_modules ./node_modules
+
 # Standalone server + static assets + public files.
 COPY --from=builder /app/public ./public
 COPY --from=builder --chown=nextjs:nodejs /app/.next/standalone ./
@@ -53,17 +70,6 @@ COPY --from=builder --chown=nextjs:nodejs /app/.next/static ./.next/static
 # `prisma migrate deploy` on boot without reaching out to the network.
 COPY --from=builder /app/prisma/schema.prisma ./prisma/schema.prisma
 COPY --from=builder /app/prisma/migrations ./prisma/migrations
-
-# Full node_modules layered on top of the standalone trace above, not just
-# node_modules/prisma + @prisma cherry-picked — the `prisma` CLI's own
-# transitive dependencies get hoisted outside the @prisma/ scope by npm's
-# flat install layout, so cherry-picking only those two paths silently
-# missed some of them: the image built fine and the container started, but
-# `prisma migrate deploy` failed inside docker-entrypoint.sh and the
-# container never became healthy (confirmed via a real CI run). Directory
-# COPY layers on top of what's already there rather than replacing it, so
-# this only fills in what the standalone trace left out.
-COPY --from=deps /app/node_modules ./node_modules
 
 COPY docker-entrypoint.sh ./
 RUN chmod +x docker-entrypoint.sh \
