@@ -10,6 +10,10 @@ on:
     branches: [main]
   pull_request:
     branches: [main]
+  # Lets anyone re-run the docker job on demand from the Actions tab without
+  # needing a new commit — useful for validating a Dockerfile change (or
+  # just re-checking it still builds) when Docker isn't available locally.
+  workflow_dispatch:
 
 # CI-only values — not real secrets. The app talks to a throwaway SQLite
 # file created fresh in this job (never a real database), and SMTP is left
@@ -117,3 +121,57 @@ jobs:
 
       - name: npm audit (high + critical)
         run: npm audit --audit-level=high
+
+  # Builds the actual production image from the Dockerfile and boots a real
+  # container from it — not just a syntax check. GitHub's ubuntu-latest
+  # runners ship Docker pre-installed, so this is how this Dockerfile gets
+  # validated end-to-end (real `docker build`, real container, real HTTP
+  # request against a running instance) without Docker available on the
+  # developer's own machine, which is the actual situation this project was
+  # built under: WSL2 is blocked by laptop policy, so `docker build` has
+  # never been run locally — this job is the first real signal on whether
+  # the Dockerfile and docker-entrypoint.sh actually work.
+  docker:
+    name: Build and smoke-test the Docker image
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Build image
+        run: docker build -t raqaba-helpdesk:ci .
+
+      # Runs against a throwaway SQLite file inside the container itself
+      # (not a mounted volume) — this job only needs to prove the image
+      # boots, migrates, and serves traffic, not that data persists.
+      - name: Run container
+        run: |
+          docker run -d --name raqaba-ci -p 3000:3000 \
+            -e DATABASE_URL="file:./ci.db" \
+            -e NEXTAUTH_SECRET="ci-only-not-a-real-secret" \
+            -e NEXTAUTH_URL="http://localhost:3000" \
+            -e APP_BASE_URL="http://localhost:3000" \
+            raqaba-helpdesk:ci
+
+      # Polls instead of a fixed sleep — migrations + server boot time can
+      # vary between runs, and a flat sleep would either waste time or
+      # (worse) flake under load. 60s cap: comfortably above what a cold
+      # migrate-deploy + Next.js standalone server boot should ever take.
+      - name: Wait for the container to become healthy
+        run: |
+          for i in $(seq 1 30); do
+            if curl -sf http://localhost:3000/api/health; then
+              echo "Healthy after $((i * 2))s"
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "Container never became healthy within 60s"
+          exit 1
+
+      - name: Container logs (always shown — confirms migrations ran and the scheduler started even on success, and is the first thing to check on failure)
+        if: always()
+        run: docker logs raqaba-ci
+
+      - name: Clean up
+        if: always()
+        run: docker rm -f raqaba-ci || true
