@@ -56,6 +56,13 @@ const CSP = [
 
 /** @type {import('next').NextConfig} */
 const nextConfig = {
+  // Produces .next/standalone — a self-contained server bundle with only
+  // the production dependencies actually traced as used, instead of
+  // requiring the full node_modules alongside .next at runtime. Docker
+  // (see Dockerfile) relies on this to keep the final image small; without
+  // it, `next start` still works locally but the standalone output simply
+  // isn't generated.
+  output: "standalone",
   // Both removed as part of the Next 16 upgrade:
   //  - `eslint.ignoreDuringBuilds` — `next build` no longer runs ESLint at
   //    all (that moved to the separate `next lint` command), so the key is

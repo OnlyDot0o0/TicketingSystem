@@ -729,6 +729,54 @@ completely from-scratch `node_modules`/lockfile.
 
 ## Path to production deploy
 
+### Docker (recommended over Vercel for this app)
+
+A `Dockerfile` is included — a multi-stage build using Next's
+`output: "standalone"` (next.config.js), Node 22 on Debian slim (not Alpine,
+to avoid Prisma query-engine musl/glibc friction), non-root runtime user,
+and a `/api/health`-based `HEALTHCHECK`. This is actually the better fit for
+this app specifically: the SLA-breach warning check
+(`src/lib/slaWarningScheduler.ts`, started from `src/instrumentation.ts`)
+runs as a background `setInterval` for the lifetime of the server process —
+that needs a genuinely long-running Node process, which a serverless
+platform like Vercel doesn't reliably provide (functions don't stay warm
+indefinitely).
+
+```bash
+docker build -t raqaba-helpdesk .
+docker run -p 3000:3000 \
+  -e DATABASE_URL="file:./dev.db" \
+  -e NEXTAUTH_SECRET="<generate: openssl rand -base64 32>" \
+  -e NEXTAUTH_URL="https://your-domain" \
+  -e APP_BASE_URL="https://your-domain" \
+  raqaba-helpdesk
+```
+
+`docker-entrypoint.sh` runs `npx prisma migrate deploy` on every container
+start before launching the server (safe to run unattended — unlike
+`migrate dev`, it only applies already-committed migrations and never
+prompts). For a multi-replica deploy, run migrations as a single one-off
+step instead and set `SKIP_MIGRATIONS=true` on the actual server replicas
+to avoid every replica racing to migrate at once.
+
+**SQLite-in-a-container caveat**: the image ships whatever
+`prisma/schema.prisma` currently targets — SQLite by default. A container's
+filesystem doesn't persist across redeploys unless you mount a volume (e.g.
+`-v raqaba-data:/app/prisma`), and SQLite doesn't support concurrent writers
+across multiple replicas. For real production traffic, do the Postgres
+conversion described below first — the Dockerfile works unchanged either
+way, since it just runs whatever `prisma/schema.prisma` says at build time.
+
+This Dockerfile was validated by running a real `npm run build` (confirms
+the production build, TypeScript check, and standalone output all succeed)
+and by inspecting the resulting `.next/standalone` output directly (confirms
+the `prisma` CLI is correctly excluded from it, hence the Dockerfile's
+separate copy step for `docker-entrypoint.sh`'s migration command) — not by
+an actual `docker build`, since Docker isn't available in the environment
+this was written in. Run a real build once before relying on this.
+
+### Without Docker
+
 1. **Host**: Deploy to Vercel (or any Node host).
 2. **Database**: Provision a hosted Postgres (Neon, Supabase, RDS, etc.). A
    complete, ready-to-apply reference schema exists at
@@ -778,10 +826,12 @@ service in this environment. Same caveat for the Postgres migration itself.
 ## Project structure
 
 ```
+Dockerfile, docker-entrypoint.sh, .dockerignore   Production container build — see "Path to production deploy"
 prisma/schema.prisma            Data model (SQLite now, Postgres-ready)
 prisma/schema.postgres.prisma   Reference schema for the eventual Postgres move — real enums,
                                  validated + client-generated, see "Path to production deploy"
-prisma/seed.ts                  Seed script (3 users, 3 projects, tickets, memberships)
+prisma/seed.ts                  Seed script (3 users, 3 projects, tickets, memberships) — local dev
+prisma/seed-essentials.ts       Minimal seed: real raqaba project + one admin, no demo data
 src/lib/access.ts               Project-scoped access control (getViewerScope, canAccessProject, ...)
 src/lib/ticketQueue.ts          Shared ticket-queue where/orderBy builder — used by /dashboard AND /dashboard/export.csv
 src/lib/rateLimit.ts            Rate limiter — in-memory sliding log (default) or Redis fixed-window if REDIS_URL is set

@@ -1,0 +1,5 @@
+# docker-entrypoint.sh runs inside a Linux container via #!/bin/sh — CRLF
+# line endings (which Windows Git's core.autocrlf can introduce on
+# checkout) break the shebang with a "bad interpreter" error at container
+# startup. Force LF regardless of the cloning machine's OS/git config.
+*.sh text eol=lf
