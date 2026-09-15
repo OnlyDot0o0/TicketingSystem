@@ -1,6 +1,18 @@
 import Link from "next/link";
 import { listActiveProjects } from "@/lib/projects";
 
+// Without this, Next statically prerenders this page at BUILD time (no
+// headers()/cookies()/searchParams here to force dynamic rendering
+// automatically) — the project list shown to every visitor would then be
+// frozen at whatever existed when `next build` last ran, never reflecting
+// projects added/removed afterward via the dashboard. Also what broke the
+// Docker build entirely: prerendering needs a real, migrated database to
+// query at build time, which the Dockerfile's builder stage never has
+// (DATABASE_URL is a runtime secret, not something baked into the image) —
+// confirmed by reproducing the exact same P2021 "table does not exist"
+// crash locally against a fresh, unmigrated database.
+export const dynamic = "force-dynamic";
+
 export default async function ProjectDirectoryPage() {
   const projects = await listActiveProjects();
 
