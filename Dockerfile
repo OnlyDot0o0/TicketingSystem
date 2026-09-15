@@ -49,15 +49,21 @@ COPY --from=builder /app/public ./public
 COPY --from=builder --chown=nextjs:nodejs /app/.next/standalone ./
 COPY --from=builder --chown=nextjs:nodejs /app/.next/static ./.next/static
 
-# Schema + migrations + the `prisma` CLI itself (NOT included in the
-# standalone trace, since it's a devDependency never imported by the app's
-# own runtime code) — needed so docker-entrypoint.sh can run
+# Schema + migrations, needed so docker-entrypoint.sh can run
 # `prisma migrate deploy` on boot without reaching out to the network.
 COPY --from=builder /app/prisma/schema.prisma ./prisma/schema.prisma
 COPY --from=builder /app/prisma/migrations ./prisma/migrations
-COPY --from=deps /app/node_modules/prisma ./node_modules/prisma
-COPY --from=deps /app/node_modules/@prisma ./node_modules/@prisma
-COPY --from=deps /app/node_modules/.bin/prisma ./node_modules/.bin/prisma
+
+# Full node_modules layered on top of the standalone trace above, not just
+# node_modules/prisma + @prisma cherry-picked — the `prisma` CLI's own
+# transitive dependencies get hoisted outside the @prisma/ scope by npm's
+# flat install layout, so cherry-picking only those two paths silently
+# missed some of them: the image built fine and the container started, but
+# `prisma migrate deploy` failed inside docker-entrypoint.sh and the
+# container never became healthy (confirmed via a real CI run). Directory
+# COPY layers on top of what's already there rather than replacing it, so
+# this only fills in what the standalone trace left out.
+COPY --from=deps /app/node_modules ./node_modules
 
 COPY docker-entrypoint.sh ./
 RUN chmod +x docker-entrypoint.sh \
