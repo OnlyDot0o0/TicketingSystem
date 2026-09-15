@@ -13,7 +13,13 @@ on:
   # Lets anyone re-run the docker job on demand from the Actions tab without
   # needing a new commit — useful for validating a Dockerfile change (or
   # just re-checking it still builds) when Docker isn't available locally.
+  # Also what triggers the `preview` job below (see its own comment).
   workflow_dispatch:
+    inputs:
+      preview_minutes:
+        description: "Minutes to keep the live preview tunnel open (preview job only)"
+        required: false
+        default: "10"
 
 # CI-only values — not real secrets. The app talks to a throwaway SQLite
 # file created fresh in this job (never a real database), and SMTP is left
@@ -175,3 +181,110 @@ jobs:
       - name: Clean up
         if: always()
         run: docker rm -f raqaba-ci || true
+
+  # Manual-trigger-only: builds the real image, runs it, seeds it with the
+  # real raqaba project (no demo data — see prisma/seed-essentials.ts), and
+  # opens a temporary public URL via Cloudflare's free "quick tunnel" (no
+  # account needed) so it can actually be clicked through in a browser —
+  # for whoever's developing this without Docker available locally (WSL2
+  # blocked by laptop policy at the time this was added). The tunnel URL is
+  # unlisted but not private: anyone who has it can reach the instance for
+  # as long as this job keeps it open. Everything is torn down when the job
+  # ends, whether that's the requested duration or a failure partway
+  # through (the `if: always()` cleanup step).
+  preview:
+    name: Temporary live preview (manual trigger only)
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    # Safety cap independent of preview_minutes — build + healthcheck +
+    # seed overhead is ~3-4 minutes, so this comfortably covers a
+    # reasonable preview_minutes value while guaranteeing the job can't run
+    # away indefinitely (e.g. a typo'd non-numeric input breaking the sleep
+    # arithmetic into something unexpected).
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+          cache: "npm"
+
+      # Host-side (outside the container) install — needed to run the seed
+      # script against the container's database file via the bind mount
+      # below, since prisma:seed:essentials needs `tsx`, a devDependency
+      # never shipped in the production image itself.
+      - name: Install dependencies
+        run: npm install --legacy-peer-deps
+
+      - name: Build image
+        run: docker build -t raqaba-helpdesk:preview .
+
+      # cloudflared's "quick tunnel" needs no account/auth token — it prints
+      # a random https://*.trycloudflare.com URL that proxies to whatever's
+      # listening on the given local port. Captured from its own log output
+      # since it doesn't expose the URL any other way for this mode.
+      - name: Start Cloudflare quick tunnel
+        run: |
+          curl -sL https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64 -o cloudflared
+          chmod +x cloudflared
+          nohup ./cloudflared tunnel --url http://localhost:3000 > cloudflared.log 2>&1 &
+          echo "Waiting for tunnel URL..."
+          url=""
+          for i in $(seq 1 30); do
+            url=$(grep -oE 'https://[a-zA-Z0-9.-]+\.trycloudflare\.com' cloudflared.log | head -1 || true)
+            if [ -n "$url" ]; then break; fi
+            sleep 2
+          done
+          if [ -z "$url" ]; then
+            echo "Failed to get a tunnel URL within 60s"
+            cat cloudflared.log
+            exit 1
+          fi
+          echo "PREVIEW_URL=$url" >> "$GITHUB_ENV"
+          echo "Tunnel URL: $url"
+
+      # NEXTAUTH_URL/APP_BASE_URL are set to the tunnel URL itself (only
+      # known after the step above), not localhost — NextAuth's callback
+      # handling and this app's absolute links (emails, redirects) need to
+      # match the URL a real visitor is actually using. Database file is
+      # bind-mounted so the host can seed it directly afterward, same
+      # pattern as the local isolated-testing instructions in README.md.
+      - name: Run container
+        run: |
+          mkdir -p preview-data
+          docker run -d --name raqaba-preview -p 3000:3000 \
+            -v "$PWD/preview-data:/app/prisma-data" \
+            -e DATABASE_URL="file:/app/prisma-data/preview.db" \
+            -e NEXTAUTH_SECRET="$(openssl rand -base64 32)" \
+            -e NEXTAUTH_URL="$PREVIEW_URL" \
+            -e APP_BASE_URL="$PREVIEW_URL" \
+            raqaba-helpdesk:preview
+
+      - name: Wait for the container to become healthy
+        run: |
+          for i in $(seq 1 30); do
+            if curl -sf http://localhost:3000/api/health; then
+              echo "Healthy after $((i * 2))s"
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "Container never became healthy within 60s"
+          docker logs raqaba-preview
+          exit 1
+
+      - name: Seed the real project (no demo data)
+        run: DATABASE_URL="file:$PWD/preview-data/preview.db" npm run prisma:seed:essentials
+
+      - name: Preview is live
+        run: |
+          echo "::notice title=Live preview ready::$PREVIEW_URL — login as admin@raqaba.local / ChangeMe123!"
+          echo "Open $PREVIEW_URL now — staying up for ${{ github.event.inputs.preview_minutes }} minute(s)."
+          sleep $(( ${{ github.event.inputs.preview_minutes }} * 60 ))
+
+      - name: Clean up
+        if: always()
+        run: |
+          docker rm -f raqaba-preview || true
+          pkill cloudflared || true
