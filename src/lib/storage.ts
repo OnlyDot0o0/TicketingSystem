@@ -50,8 +50,19 @@ export const UPLOAD_ROOT = path.join(process.cwd(), "uploads");
 // that trick only made sense when "the storage" was always a real
 // filesystem path; an S3 key has no filesystem to traverse out of, but a
 // ".." segment is still not a key this app ever legitimately generated.
+// Windows drive-letter prefix ("C:/...", "C:\...") — checked explicitly
+// rather than relying solely on path.isAbsolute() below, since that uses
+// Node's OS-default path module: on Linux (this app's actual production
+// target — see Dockerfile) path.isAbsolute("C:/Windows/System32") is
+// false, so a Linux server would silently accept a key shaped like this
+// without the explicit check here. Caught by tests/unit/storage.test.ts
+// failing in CI (Linux) while passing locally on Windows, where
+// path.isAbsolute already happens to catch it — exactly the kind of
+// platform-dependent gap this check exists to close.
+const WINDOWS_DRIVE_PREFIX_RE = /^[a-zA-Z]:[/\\]/;
+
 export function assertSafeKey(key: string) {
-  if (!key || path.isAbsolute(key) || key.includes("\\")) {
+  if (!key || path.isAbsolute(key) || key.includes("\\") || WINDOWS_DRIVE_PREFIX_RE.test(key)) {
     throw new Error("مفتاح تخزين غير صالح.");
   }
   const segments = key.split("/");
