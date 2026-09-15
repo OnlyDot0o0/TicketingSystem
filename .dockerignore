@@ -23,5 +23,11 @@ prisma/test.db-shm
 .env.*
 !.env.example
 
-tests
-debug-project.ts
+# NOT excluding tests/ — vitest.config.ts (at the repo root, so it's always
+# in the build context) imports ./tests/testDbUrl, and `next build`'s
+# TypeScript check resolves that import even though nothing under tests/
+# is otherwise used by the app itself. Excluding it broke the Docker build
+# with "Cannot find module './tests/testDbUrl'" — confirmed by a real CI
+# run before this fix. tests/ never ends up in the final runner image
+# regardless (the runner stage only COPYs specific paths from builder/deps),
+# so keeping it in the build context costs nothing at runtime.
