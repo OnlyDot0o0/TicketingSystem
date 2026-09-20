@@ -156,6 +156,7 @@ jobs:
             -e NEXTAUTH_SECRET="ci-only-not-a-real-secret" \
             -e NEXTAUTH_URL="http://localhost:3000" \
             -e APP_BASE_URL="http://localhost:3000" \
+            -e SEED_ESSENTIALS="true" \
             raqaba-helpdesk:ci
 
       # Polls instead of a fixed sleep — migrations + server boot time can
@@ -173,6 +174,14 @@ jobs:
           done
           echo "Container never became healthy within 60s"
           exit 1
+
+      # /api/health only proves the DB is reachable, not that it has any
+      # data — a fresh schema-only database (the "it's empty" case) passes
+      # it too. /raqaba 404s unless the seeded project actually exists.
+      - name: Verify the seeded project is served
+        run: |
+          curl -sf http://localhost:3000/raqaba > /dev/null
+          echo "/raqaba served — seeding inside the container worked"
 
       - name: Container logs (always shown — confirms migrations ran and the scheduler started even on success, and is the first thing to check on failure)
         if: always()

@@ -744,13 +744,33 @@ indefinitely).
 
 ```bash
 docker build -t raqaba-helpdesk .
-docker run -p 3000:3000 \
-  -e DATABASE_URL="file:./dev.db" \
+docker run -d --name raqaba -p 3000:3000 \
+  -v raqaba-data:/app/data \
+  -e DATABASE_URL="file:/app/data/app.db" \
   -e NEXTAUTH_SECRET="<generate: openssl rand -base64 32>" \
-  -e NEXTAUTH_URL="https://your-domain" \
-  -e APP_BASE_URL="https://your-domain" \
+  -e NEXTAUTH_URL="http://localhost:3000" \
+  -e APP_BASE_URL="http://localhost:3000" \
+  -e SEED_ESSENTIALS="true" \
   raqaba-helpdesk
+docker logs raqaba        # should show migrations applying, then "Seeding essentials..."
 ```
+
+Then open `http://localhost:3000` and log in as `admin@raqaba.local` /
+`ChangeMe123!` (change it immediately). Set `NEXTAUTH_URL`/`APP_BASE_URL` to
+the real URL people will use once it's deployed behind a domain.
+
+- **`DATABASE_URL` must point at a database *file* on the volume** (or a
+  Postgres URL) — not at `schema.prisma` or any other existing file. The
+  schema is applied automatically on boot; the file just needs to be a path
+  SQLite can create. `/app/data` is the volume-friendly location (owned by the
+  container's non-root user); don't mount a volume over `/app/prisma`, which
+  would hide the schema and migrations baked into the image.
+- **`SEED_ESSENTIALS=true`** runs `prisma/seed-essentials.ts` after
+  migrations: the real `raqaba` project + one admin account. Without it a
+  fresh database is schema-only — no projects, no users — which looks like
+  "the app is empty". It's idempotent (safe to leave on across restarts) and
+  never resets an existing admin's password.
+- **`NEXTAUTH_SECRET` is required** — without it login fails.
 
 `docker-entrypoint.sh` runs `npx prisma migrate deploy` on every container
 start before launching the server (safe to run unattended — unlike
@@ -762,7 +782,7 @@ to avoid every replica racing to migrate at once.
 **SQLite-in-a-container caveat**: the image ships whatever
 `prisma/schema.prisma` currently targets — SQLite by default. A container's
 filesystem doesn't persist across redeploys unless you mount a volume (e.g.
-`-v raqaba-data:/app/prisma`), and SQLite doesn't support concurrent writers
+`-v raqaba-data:/app/data` with a `DATABASE_URL` under it, as above), and SQLite doesn't support concurrent writers
 across multiple replicas. For real production traffic, do the Postgres
 conversion described below first — the Dockerfile works unchanged either
 way, since it just runs whatever `prisma/schema.prisma` says at build time.

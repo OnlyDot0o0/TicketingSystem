@@ -71,9 +71,20 @@ COPY --from=builder --chown=nextjs:nodejs /app/.next/static ./.next/static
 COPY --from=builder /app/prisma/schema.prisma ./prisma/schema.prisma
 COPY --from=builder /app/prisma/migrations ./prisma/migrations
 
+# For SEED_ESSENTIALS=true (see docker-entrypoint.sh): the seed script and
+# the only two src/ files it imports (categories.ts -> customFields.ts).
+# tsx itself is already in the node_modules copied from deps above.
+COPY --from=builder /app/prisma/seed-essentials.ts ./prisma/seed-essentials.ts
+COPY --from=builder /app/src/lib/categories.ts ./src/lib/categories.ts
+COPY --from=builder /app/src/lib/customFields.ts ./src/lib/customFields.ts
+
 COPY docker-entrypoint.sh ./
+# /app/data: the place to keep the SQLite file (DATABASE_URL=file:/app/data/app.db)
+# on a volume — a named volume mounted here inherits nextjs ownership from
+# this directory. Deliberately NOT /app/prisma: mounting a volume there would
+# shadow the schema + migrations baked into the image.
 RUN chmod +x docker-entrypoint.sh \
-    && mkdir -p uploads \
+    && mkdir -p uploads data \
     && chown -R nextjs:nodejs /app
 
 USER nextjs

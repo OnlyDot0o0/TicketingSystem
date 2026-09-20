@@ -13,4 +13,13 @@ if [ "$SKIP_MIGRATIONS" != "true" ]; then
   npx prisma migrate deploy
 fi
 
+# Opt-in: creates the real raqaba project + one admin account
+# (prisma/seed-essentials.ts — idempotent upserts, so safe on every boot; it
+# never resets an existing admin's password). Without this a fresh database
+# is schema-only: no projects, no users, nothing to log in with.
+if [ "$SEED_ESSENTIALS" = "true" ]; then
+  echo "Seeding essentials..."
+  npx tsx prisma/seed-essentials.ts
+fi
+
 exec node server.js
